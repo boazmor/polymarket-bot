@@ -1,0 +1,10 @@
+- [User background](user_profile.md) — 40 years since formal training (COBOL era), not an active developer; relies on AI for code, strong on the trading strategy domain
+- [Communication style — Hebrew, simple](feedback_communication.md) — reply in Hebrew, minimize English jargon, explain unavoidable English terms in plain Hebrew
+- [Minimize friction](feedback_minimal_friction.md) — user dislikes multi-step processes; offer simplest path first, do work via tools rather than asking the user, suggest claude.ai web for image-heavy tasks
+- [Bot workflow rules](feedback_bot_workflow_rules.md) — strict rules: complete files only, no silent tactic changes, no nano, מחשב/שרת structure, upload-then-run, every bot has research, clean reports, optimize dollars not win-rate
+- [Solo developer](feedback_solo_developer.md) — only one person on the code; skip team ceremony (no PRs, branches, CI, key-based SSH); only enforce two silent guardrails: never commit secrets, never print keys
+- [Polymarket BTC 5-min bot](project_polymarket_bot.md) — Python buy-only bot; current file BTC_5M_DUAL_DISTANCE_RESEARCH_V6.py (BOT40+BOT120); still simulation, wallet not connected; key finding: distance vs Binance profitable, vs Polymarket loses
+- [Hetzner server (Germany)](reference_hetzner_server.md) — production VPS at 178.104.134.228, Ubuntu, Python 3.12, ssh root@ with password; two recorder dirs documented; nothing running as of 29/04
+- [Local copies of server recordings](reference_local_recordings.md) — downloaded 29/04 to Desktop\server_recordings_2026-04-29 (~76MB); Binance+Poly and Chainlink have NO time overlap — joint re-run needed for direct comparison
+- [Chainlink latency finding](project_chainlink_latency_finding.md) — Chainlink BTC feed lags ~1.2s (p50); strong hypothesis for why "Polymarket distance" lost while "Binance distance" profited; 38h dataset shows DOWN won 68.5% — strongly down-trending period biased prior results
+- [GitHub repo](reference_github_repo.md) — private repo at github.com/boazmor/polymarket-bot.git, sync point between home, office, and server
