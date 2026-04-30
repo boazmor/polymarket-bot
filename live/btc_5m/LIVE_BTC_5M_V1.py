@@ -528,6 +528,9 @@ class Polymarket5mDualBot:
 
 
     def extract_target_from_page(self, url: str) -> Optional[float]:
+        """Plain HTTP fetch + regex (legacy fallback). Try __NEXT_DATA__ first via
+        extract_target_from_next_data — that's the reliable browser-free method.
+        """
         try:
             r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
@@ -548,6 +551,97 @@ class Polymarket5mDualBot:
                 except Exception:
                     pass
         return None
+
+    def extract_target_from_next_data(self, url: str, slug: str) -> Tuple[Optional[float], str]:
+        """Browser-free target extraction. Polymarket pages embed all market
+        metadata in a <script id="__NEXT_DATA__"> JSON tag. We fetch the page
+        with plain HTTP, parse the JSON, find the event whose slug matches our
+        market, and return its eventMetadata.priceToBeat.
+
+        This avoids Playwright entirely. Works on Windows + Python 3.14 where
+        Playwright currently has subprocess issues.
+
+        Returns (target_price_or_None, source_label).
+        """
+        try:
+            r = requests.get(url, timeout=20, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+            })
+            r.raise_for_status()
+            html = r.text
+        except Exception as e:
+            return None, f"http_error:{type(e).__name__}"
+
+        m = re.search(
+            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html, re.DOTALL,
+        )
+        if not m:
+            return None, "next_data_missing"
+        try:
+            data = json.loads(m.group(1))
+        except Exception as e:
+            return None, f"json_parse_error:{type(e).__name__}"
+
+        events: List[Tuple[str, dict]] = []
+
+        def walk(obj, path=""):
+            if isinstance(obj, dict):
+                if "slug" in obj and ("eventMetadata" in obj or "priceToBeat" in obj):
+                    events.append((path, obj))
+                for k, v in obj.items():
+                    walk(v, f"{path}.{k}" if path else k)
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    walk(v, f"{path}[{i}]")
+
+        walk(data)
+
+        def read_price_to_beat(event: dict) -> Optional[float]:
+            meta = event.get("eventMetadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            for d in (meta, event):
+                if not isinstance(d, dict):
+                    continue
+                for k in ("priceToBeat", "price_to_beat", "targetPrice", "target_price"):
+                    v = d.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        x = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if 10000 <= x <= 500000:
+                        return x
+            return None
+
+        # 1) exact slug match — preferred
+        for path, ev in events:
+            if ev.get("slug") == slug:
+                target = read_price_to_beat(ev)
+                if target is not None:
+                    return target, "next_data_slug_match"
+
+        # 2) suffix match — slug ends with same numeric epoch
+        m_suffix = re.search(r"(\d+)$", slug)
+        epoch_str = m_suffix.group(1) if m_suffix else None
+        if epoch_str:
+            for path, ev in events:
+                ev_slug = ev.get("slug") or ""
+                m_ev = re.search(r"(\d+)$", ev_slug)
+                if m_ev and m_ev.group(1) == epoch_str:
+                    target = read_price_to_beat(ev)
+                    if target is not None:
+                        return target, "next_data_epoch_match"
+
+        return None, f"no_match_among_{len(events)}_events"
 
     async def extract_target_from_rendered_page(self, url: str) -> Tuple[Optional[float], str, str]:
         if async_playwright is None:
@@ -707,6 +801,34 @@ class Polymarket5mDualBot:
         slug_at_start = self.current.get("slug")
         url_at_start = self.current.get("url") or ""
         self.current["render_retry_status"] = "trying"
+
+        # FIRST try the browser-free __NEXT_DATA__ method — fast, reliable, no
+        # Playwright dependency. Avoids the Windows + Python 3.14 subprocess issue.
+        try:
+            nd_target, nd_src = await asyncio.to_thread(
+                self.extract_target_from_next_data, url_at_start, slug_at_start or ""
+            )
+        except Exception as e:
+            nd_target, nd_src = None, f"next_data_exception:{type(e).__name__}"
+        if self.current.get("slug") != slug_at_start:
+            return
+        if nd_target is not None:
+            self.current["render_retry_attempts"] = int(self.current.get("render_retry_attempts") or 0) + 1
+            self.current["render_retry_last_sec"] = self.seconds_from_market_start()
+            self.current["render_retry_last_source"] = nd_src
+            self.current["render_retry_last_error"] = "-"
+            self.current["target_rendered_page"] = float(nd_target)
+            self.current["target_price"] = float(nd_target)
+            self.current["target_source"] = nd_src
+            self.current["render_retry_status"] = "captured"
+            try:
+                self.logger.log_event(self.current["slug"], "TARGET_CAPTURED",
+                                      f"slug={self.current['slug']} target={nd_target} src={nd_src}")
+            except Exception:
+                pass
+            return
+
+        # Fall back to Playwright if __NEXT_DATA__ didn't yield a target.
         rendered_target, source, err = await self.extract_target_from_rendered_page(url_at_start)
         if self.current.get("slug") != slug_at_start:
             return
