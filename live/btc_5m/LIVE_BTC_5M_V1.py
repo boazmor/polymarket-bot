@@ -801,34 +801,6 @@ class Polymarket5mDualBot:
         slug_at_start = self.current.get("slug")
         url_at_start = self.current.get("url") or ""
         self.current["render_retry_status"] = "trying"
-
-        # FIRST try the browser-free __NEXT_DATA__ method — fast, reliable, no
-        # Playwright dependency. Avoids the Windows + Python 3.14 subprocess issue.
-        try:
-            nd_target, nd_src = await asyncio.to_thread(
-                self.extract_target_from_next_data, url_at_start, slug_at_start or ""
-            )
-        except Exception as e:
-            nd_target, nd_src = None, f"next_data_exception:{type(e).__name__}"
-        if self.current.get("slug") != slug_at_start:
-            return
-        if nd_target is not None:
-            self.current["render_retry_attempts"] = int(self.current.get("render_retry_attempts") or 0) + 1
-            self.current["render_retry_last_sec"] = self.seconds_from_market_start()
-            self.current["render_retry_last_source"] = nd_src
-            self.current["render_retry_last_error"] = "-"
-            self.current["target_rendered_page"] = float(nd_target)
-            self.current["target_price"] = float(nd_target)
-            self.current["target_source"] = nd_src
-            self.current["render_retry_status"] = "captured"
-            try:
-                self.logger.log_event(self.current["slug"], "TARGET_CAPTURED",
-                                      f"slug={self.current['slug']} target={nd_target} src={nd_src}")
-            except Exception:
-                pass
-            return
-
-        # Fall back to Playwright if __NEXT_DATA__ didn't yield a target.
         rendered_target, source, err = await self.extract_target_from_rendered_page(url_at_start)
         if self.current.get("slug") != slug_at_start:
             return
