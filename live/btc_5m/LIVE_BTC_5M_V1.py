@@ -2,36 +2,34 @@
 """
 LIVE_BTC_5M_V1.py
 =================
-Live trading bot for Polymarket Bitcoin 5-minute Up/Down markets.
+Live trading bot for Polymarket BTC 5-min Up/Down markets.
+Forked from research bot V3 (good_working_bot_kululu_V3.py) — same engine,
+same screen, same market manager. Strategy switched from TAKER (V3) to MAKER
+(passive limit orders) per user request 2026-04-30.
 
-Strategy is V3 with user-approved tweaks (logged here for transparency):
-  - BOT40 (sec 0-40): buy at limit prices 0.29 (sec 0-30) or 0.35 (sec 30-40).
-    If |distance| >= 25, only with the flow side.
-    [CHANGED FROM V3: phase-1 price 0.31 -> 0.29 to get cheaper fills.]
-  - BOT120 (sec 0-120, full window): buy if |distance| >= 68, direction-only
-    (UP if BTC > target, DOWN if BTC < target), price cap 0.80.
-    [CHANGED FROM V3: active range 41-120 -> 0-120 (V4-style); threshold 60 -> 68;
-     added price cap 0.80 (V3 had no cap).]
-  - Buy only, never sells, holds to settlement.
-  - BOT40 and BOT120 can both fire in the same market — each at most once per market.
+STRATEGY (MAKER)
+  BOT40 phase 1 (sec 0-30): place THREE simultaneous limit BUY orders at
+    0.28, 0.29, and 0.30. Each is BOT40_MAKER_SIZE_USD. Total committed in book
+    is 3 * BOT40_MAKER_SIZE_USD. Listens for fills. When total filled reaches
+    MAX_BUY_USD, cancels remaining open orders.
+  BOT40 phase 2 (sec 30-40): cancel any phase-1 orders still open. If
+    total filled < MAX_BUY_USD, place a top-up order at 0.35 for the remaining.
+  BOT120 (sec 0-120, full window): if |distance| >= 68, direction-only
+    (UP if BTC > target, DOWN if BTC < target), price cap 0.80. Single buy
+    per market. Direction-side BUY at best ask when conditions met.
+  Both bots: BUY only, hold to settlement.
 
-Safety:
-  - Default mode is DRY-RUN (decisions printed and logged, no real orders).
-  - Live mode requires --live flag AND a confirmation prompt at startup.
-  - Per trade: $5 (configurable via DOLLARS_PER_TRADE).
-  - Daily loss cap: bot stops itself after $20 net losses today.
-  - Wallet cap: bot refuses to trade if wallet > $100.
+SAFETY (enforced in code)
+  - Default mode is DRY-RUN (orders simulated, nothing sent).
+  - --live flag PLUS confirmation prompt required for real orders.
+  - Per-trade size: MAX_BUY_USD ($5 in test, $100 long-term goal).
+  - Daily loss cap: MAX_DAILY_LOSS_USD ($40) -> kill switch on bot.
+  - Wallet exposure cap: MAX_WALLET_USD ($200) -> refuse to trade.
 
 Run:
-  python LIVE_BTC_5M_V1.py                    # dry-run, prompts for market URL
-  python LIVE_BTC_5M_V1.py --url <URL>        # dry-run with URL pre-set
-  python LIVE_BTC_5M_V1.py --live --url <URL> # LIVE trading (will prompt to confirm)
-
-Requires:
-  pip install requests websockets python-dotenv
-  pip install py-clob-client      # only needed for --live mode
+  python LIVE_BTC_5M_V1.py                # dry-run, prompts for market URL
+  python LIVE_BTC_5M_V1.py --live         # LIVE trading (will prompt to confirm)
 """
-
 import argparse
 import asyncio
 import csv
@@ -39,23 +37,21 @@ import json
 import math
 import os
 import re
-import signal
+import shutil
 import ssl
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
-from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
-from collections import deque
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import websockets
 
 try:
-    from dotenv import load_dotenv
+    from playwright.async_api import async_playwright
 except Exception:
-    load_dotenv = None
+    async_playwright = None
 
 try:
     from py_clob_client.client import ClobClient
@@ -65,311 +61,107 @@ try:
 except Exception:
     HAS_CLOB = False
 
-try:
-    from playwright.async_api import async_playwright
-    HAS_PLAYWRIGHT = True
-except Exception:
-    async_playwright = None
-    HAS_PLAYWRIGHT = False
-
-
-# =============================================================================
-# STRATEGY CONSTANTS  (mirror research V3)
-# =============================================================================
-BOT40_MIN_SEC = 0
-BOT40_MAX_SEC = 40
-BOT40_LIMIT_END_SEC = 30
-BOT40_LIMIT_PRICE = 0.29          # CHANGED from V3 (was 0.31) — user request 2026-04-30
-BOT40_FALLBACK_PRICE = 0.35
-BOT40_FLOW_DIST_THRESHOLD = 25.0
-BOT120_MIN_SEC = 0                # CHANGED from V3 (was 41) — V4-style, full window
-BOT120_MAX_SEC = 120
-MIN_DIST_BOT120 = 68.0            # CHANGED from V3 (was 60.0) — user request
-BOT120_MAX_PRICE = 0.80           # NEW vs V3 — price cap on BOT120 buys
-
-
-# =============================================================================
-# LIVE TRADING CONFIG
-# =============================================================================
-DOLLARS_PER_TRADE = 5.0
-MAX_BUY_PER_BOT_PER_MARKET = 5.0   # one fill per bot per market
-MAX_DAILY_LOSS_USD = 20.0
-MAX_WALLET_EXPOSURE_USD = 100.0
-
-
-# =============================================================================
-# NETWORK / DATA
-# =============================================================================
-GAMMA_MARKETS = "https://gamma-api.polymarket.com/markets"
-POLY_BOOK_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-BINANCE_WS = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+GAMMA_MARKETS_BY_SLUG = "https://gamma-api.polymarket.com/markets"
+POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
 CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
 
-DATA_DIR_NAME = "data"   # created next to this script
 HEARTBEAT_EVERY_SEC = 10
 STALE_AFTER_SEC = 20
 SCREEN_REFRESH_EVERY_SEC = 1
-HTTP_TIMEOUT = 20
+BOT40_MAX_SEC = 40
+BOT120_MIN_SEC = 0           # CHANGED FROM V3 (was 41) — V4-style, full window
+BOT120_MAX_SEC = 120
+ENTRY_THRESHOLD = 0.35
+DATA_DIR = "data_live_btc_5m_v1"
+
+ANSI_RESET = "\033[0m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_BOLD = "\033[1m"
+ANSI_CYAN = "\033[36m"
+ANSI_WHITE = "\033[37m"
+ANSI_DIM = "\033[2m"
+ANSI_BLINK = "\033[5m"
+MIN_DIST_BOT120 = 68.0           # CHANGED FROM V3 (was 60.0) — user request
+BOT40_LIMIT_END_SEC = 30
+BOT40_FALLBACK_PRICE = 0.35
+BOT120_MAX_PRICE = 0.80          # NEW vs V3 — price cap on BOT120 buys
+RENDER_RETRY_WINDOW_SEC = 20
+RENDER_RETRY_INTERVAL_SEC = 2
+BOT40_FLOW_DIST_THRESHOLD = 25.0
+BOT40_RESEARCH_PRICE_LEVELS = [round(x / 100.0, 2) for x in range(28, 43)]
+BOT40_RESEARCH_SECONDS = list(range(32, 43))
+BOT120_RESEARCH_SECONDS = [55, 57, 59, 62, 64]
+BOT120_RESEARCH_DISTANCE_LEVELS = [55.0, 57.0, 59.0, 62.0, 64.0]
+
+# ============================================================================
+# LIVE TRADING — strategy and safety constants
+# ============================================================================
+# Maker model: BOT40 phase 1 places THREE simultaneous limit orders at these
+# price levels.  Each level gets BOT40_MAKER_SIZE_USD of capital reserved.
+# Total in book = 3 * BOT40_MAKER_SIZE_USD.  Cap on actual fills = MAX_BUY_USD.
+BOT40_MAKER_LEVELS = [0.28, 0.29, 0.30]
+
+# Production size — same for virtual (dry-run) testing and for live trading.
+# Virtual uses no real money so size is risk-free for testing.
+MAX_BUY_USD = 100.0
+BOT40_MAKER_SIZE_USD = 60.0      # 3 simultaneous orders -> $180 reserved in book; cap actual fills at MAX_BUY_USD
+
+# Safety stops (enforced inside the bot, not just policy)
+MAX_DAILY_LOSS_USD = 40.0        # bot kills itself after this much realized loss today
+MAX_WALLET_USD = 200.0           # bot refuses to trade if wallet balance > this
+
+# Modes
+DRY_RUN_DEFAULT = True           # default; --live flag plus confirmation flips it
 
 
-# =============================================================================
-# ANSI
-# =============================================================================
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
+def color_text(txt: str, color: Optional[str]) -> str:
+    return f"{color}{txt}{ANSI_RESET}" if color else txt
 
 
-# =============================================================================
-# UTILITIES
-# =============================================================================
-def now_local_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def today_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def safe_float(v) -> Optional[float]:
-    try:
-        if v is None or v == "":
-            return None
-        x = float(v)
-        return x if math.isfinite(x) else None
-    except Exception:
-        return None
-
-
-def fmt(v: Optional[float], digits: int = 2) -> str:
-    if v is None:
-        return "-"
-    try:
-        return f"{float(v):,.{digits}f}"
-    except Exception:
-        return str(v)
-
-
-def color_money(v: Optional[float]) -> str:
-    if v is None:
-        return "-"
-    s = f"{v:+,.2f}"
+def color_money(v: float, blink: bool = False) -> str:
+    s = f"${v:,.2f}"
+    prefix = ANSI_BLINK if blink else ""
     if v > 0:
-        return f"{GREEN}{s}{RESET}"
+        return f"{prefix}{ANSI_GREEN}{s}{ANSI_RESET}"
     if v < 0:
-        return f"{RED}{s}{RESET}"
+        return f"{prefix}{ANSI_RED}{s}{ANSI_RESET}"
     return s
 
 
-def clear_screen() -> None:
-    print("\033[2J\033[H", end="")
+def trim_cell(text: str, width: int) -> str:
+    text = str(text)
+    if len(text) <= width:
+        return text.ljust(width)
+    if width <= 3:
+        return text[:width]
+    return (text[: width - 3] + "...").ljust(width)
 
 
-def now_epoch_s() -> int:
-    return int(time.time())
-
-
-def floor_to_5m_epoch(epoch_s: Optional[int] = None) -> int:
-    if epoch_s is None:
-        epoch_s = now_epoch_s()
-    return (epoch_s // 300) * 300
-
-
-def slug_with_new_suffix(slug: str, new_suffix: int) -> str:
-    return re.sub(r"\d+$", str(new_suffix), slug)
-
-
-def extract_slug(url: str) -> str:
-    m = re.search(r"/event/([^/?#]+)", url.strip())
-    if not m:
-        raise ValueError("Could not extract slug from URL. Paste a Polymarket /event/ URL.")
-    return m.group(1).strip().strip("/")
-
-
-def event_url_from_slug(slug: str) -> str:
-    return f"https://polymarket.com/event/{slug}"
-
-
-def parse_target_from_question(question: str) -> Optional[float]:
-    if not question:
-        return None
-    nums = re.findall(r"(?<!\d)(\d{2,3}(?:,\d{3})+|\d{4,6})(?!\d)", question.replace("$", ""))
-    for n in nums:
-        x = safe_float(n.replace(",", ""))
-        if x is not None and 10000 <= x <= 500000:
-            return x
-    return None
-
-
-def parse_target_from_market_obj(market_obj: dict) -> Optional[float]:
-    try:
-        meta = market_obj.get("eventMetadata") or market_obj.get("event_metadata") or {}
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except Exception:
-                meta = {}
-        if isinstance(meta, dict):
-            for key in ("priceToBeat", "price_to_beat", "targetPrice", "target_price"):
-                x = safe_float(meta.get(key))
-                if x is not None and 10000 <= x <= 500000:
-                    return x
-        for key in ("priceToBeat", "price_to_beat", "targetPrice", "target_price",
-                    "line", "strikePrice", "strike_price"):
-            x = safe_float(market_obj.get(key))
-            if x is not None and 10000 <= x <= 500000:
-                return x
-    except Exception:
-        pass
-    return None
-
-
-def extract_target_from_html(url: str) -> Optional[float]:
-    try:
-        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        html = r.text
-    except Exception:
-        return None
-    patterns = [
-        r'Price\s*to\s*Beat[^\d$]{0,120}\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
-        r'priceToBeat[^0-9]{0,80}([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
-        r'targetPrice[^0-9]{0,80}([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
-    ]
-    for pat in patterns:
-        m = re.search(pat, html, re.IGNORECASE | re.DOTALL)
-        if m:
-            x = safe_float(m.group(1).replace(",", ""))
-            if x is not None and 10000 <= x <= 500000:
-                return x
-    return None
-
-
-async def extract_target_from_rendered_page(url: str) -> Tuple[Optional[float], str]:
-    """
-    Reliable target capture by rendering the Polymarket page in headless Chromium
-    (Playwright). Polymarket renders 'Price to Beat' via JavaScript, so the raw
-    HTML scrape misses it but the rendered page exposes it.
-
-    Returns: (target_price_or_none, source_or_error_string).
-    """
-    if not HAS_PLAYWRIGHT or async_playwright is None:
-        return None, "playwright_not_installed"
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
-            )
-            try:
-                page = await browser.new_page(
-                    viewport={"width": 1600, "height": 1400},
-                    user_agent=(
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                )
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(3500)
-                rendered_parts: List[str] = []
-                try:
-                    rendered_parts.append(await page.locator("body").inner_text(timeout=10000))
-                except Exception:
-                    pass
-                try:
-                    txt = await page.text_content("body")
-                    if txt:
-                        rendered_parts.append(txt)
-                except Exception:
-                    pass
-                try:
-                    rendered_parts.append(await page.content())
-                except Exception:
-                    pass
-                rendered = "\n".join(t for t in rendered_parts if t)
-                # primary: "Price to Beat" anchor + first BTC-like dollar value after it
-                for label in (r'Price\s*to\s*Beat', r'PRICE\s*TO\s*BEAT'):
-                    m = re.search(label, rendered, re.IGNORECASE)
-                    if not m:
-                        continue
-                    window = rendered[m.start(): m.start() + 1200]
-                    nums = re.findall(r'\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)', window)
-                    for n in nums:
-                        x = safe_float(n.replace(",", ""))
-                        if x is not None and 10000 <= x <= 500000:
-                            return x, "rendered_price_to_beat"
-                    nums = re.findall(r'(?<!\d)([0-9]{2,3}(?:,[0-9]{3})+(?:\.\d+)?)(?!\d)', window)
-                    for n in nums:
-                        x = safe_float(n.replace(",", ""))
-                        if x is not None and 10000 <= x <= 500000:
-                            return x, "rendered_no_dollar"
-                # secondary: regex over rendered text
-                for pat in (
-                    r'Price\s*to\s*Beat[\s\S]{0,300}?\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)',
-                    r'priceToBeat[^0-9]{0,120}([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)',
-                ):
-                    m = re.search(pat, rendered, re.IGNORECASE | re.DOTALL)
-                    if m:
-                        x = safe_float(m.group(1).replace(",", ""))
-                        if x is not None and 10000 <= x <= 500000:
-                            return x, "rendered_regex"
-                return None, "rendered_target_not_found"
-            finally:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-    except Exception as e:
-        return None, f"rendered_error:{type(e).__name__}:{e}"
-
-
-# =============================================================================
-# DATA STRUCTURES
-# =============================================================================
-@dataclass
-class MarketInfo:
-    slug: str
-    suffix: int
-    market_epoch: int
-    url: str
-    question: str = ""
-    start_iso: str = ""
-    end_iso: str = ""
-    target_price: Optional[float] = None
-    target_source: Optional[str] = None
-    up_token: Optional[str] = None
-    down_token: Optional[str] = None
-    loaded_at: float = 0.0   # wall-clock when market info was loaded (used for fresh-ask check)
+def colorize_decision(text: str, active: bool = False) -> str:
+    color = ANSI_YELLOW if active and "BUY" in str(text) else ANSI_WHITE
+    prefix = ANSI_BLINK if active and "BUY" in str(text) else ""
+    return f"{prefix}{color}{text}{ANSI_RESET}"
 
 
 @dataclass
-class OrderBookSide:
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    last: Optional[float] = None
-    ask_levels: List[Tuple[float, float]] = field(default_factory=list)  # (price, qty) sorted ascending
-    updated_at: float = 0.0
-    updates: int = 0
-
-    def stale(self) -> bool:
-        if self.updated_at <= 0:
-            return True
-        return (time.time() - self.updated_at) > STALE_AFTER_SEC
-
-    def has_fresh_ask_for_market(self, market_loaded_at: float) -> bool:
-        """Strict V3-style check: ask exists AND updated AFTER the current market was loaded."""
-        if self.ask is None:
-            return False
-        if self.updated_at <= 0:
-            return False
-        if market_loaded_at <= 0:
-            return not self.stale()
-        return self.updated_at >= market_loaded_at and not self.stale()
+class VirtualPosition:
+    sec: int
+    side: str
+    spent: float
+    qty: float
+    avg_fill: float
+    entry_best_ask: Optional[float]
+    entry_best_bid: Optional[float]
+    entry_btc_price: Optional[float] = None
+    entry_target_price: Optional[float] = None
+    entry_distance: Optional[float] = None
+    entry_flow_side: Optional[str] = None
+    entry_with_flow: Optional[int] = None
+    entry_ts: str = ""
 
 
 @dataclass
@@ -377,696 +169,763 @@ class BotState:
     name: str
     start_sec: int
     end_sec: int
-    bought_in_market: bool = False     # one buy per market per bot
-    spent_this_market: float = 0.0
-    last_decision: str = "WAIT"
-    last_note: str = "init"
+    positions: Dict[str, List[VirtualPosition]] = field(default_factory=lambda: {"UP": [], "DOWN": []})
+    current_market_buy_count: int = 0
+    current_market_spent: float = 0.0
+    last_buy: Optional[dict] = None
+    buy_done_for_market: bool = False
+    executed_virtual_sec_side: set = field(default_factory=set)
+    last_logged_sec_side: set = field(default_factory=set)
+    last_decision: str = "NONE"
+    last_note: str = "starting"
+    triggers_seen: int = 0
+    virtual_buy_count: int = 0
+    virtual_spent_total: float = 0.0
+    realized_pnl_total: float = 0.0
+    realized_payout_total: float = 0.0
+    settled_markets: int = 0
+    wins: int = 0
+    losses: int = 0
+    pushes: int = 0
 
     def reset_market(self) -> None:
-        self.bought_in_market = False
-        self.spent_this_market = 0.0
-        self.last_decision = "WAIT"
-        self.last_note = "new market"
+        self.positions = {"UP": [], "DOWN": []}
+        self.current_market_buy_count = 0
+        self.current_market_spent = 0.0
+        self.last_buy = None
+        self.buy_done_for_market = False
+        self.executed_virtual_sec_side = set()
+        self.last_logged_sec_side = set()
+        self.last_decision = "NONE"
+        self.last_note = "starting market"
 
 
-@dataclass
-class FilledOrder:
-    order_id: str
-    bot: str
-    side: str         # "UP" / "DOWN"
-    market_slug: str
-    market_epoch: int
-    sec_from_start: int
-    price: float
-    size_shares: float
-    spent_usd: float
-    btc_price_at_entry: Optional[float]
-    target_price_at_entry: Optional[float]
-    distance_at_entry: Optional[float]
-    flow_side_at_entry: Optional[str]
-    with_flow: int
-    placed_ts: str
-    filled: bool = False
-    fill_ts: str = ""
-    settled: bool = False
-    settle_ts: str = ""
-    winner_side: str = ""
-    payout_usd: float = 0.0
-    pnl_usd: float = 0.0
-    dry_run: bool = False
-
-
-@dataclass
-class Decision:
-    bot: str            # "BOT40" / "BOT120"
-    side: str           # "UP" / "DOWN"
-    price_limit: float  # max price we'll pay
-    size_usd: float     # how many dollars to spend
-    reason: str         # human-readable note for logs
-
-
-# =============================================================================
-# CSV LOGGER  (live data, append-only — never wipes)
-# =============================================================================
-class LiveLogger:
-    def __init__(self, data_dir: Path) -> None:
-        self.data_dir = data_dir
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.paths = {
-            "trades":    self.data_dir / "live_trades.csv",
-            "decisions": self.data_dir / "live_decisions.csv",
-            "errors":    self.data_dir / "live_errors.csv",
-            "events":    self.data_dir / "live_events.csv",
-            "pnl":       self.data_dir / "live_pnl_daily.csv",
-        }
-        self._init_if_missing("trades", [
-            "ts", "dry_run", "bot", "slug", "market_epoch", "sec_from_start",
-            "side", "limit_price", "size_usd", "shares", "btc_price",
-            "target_price", "distance", "flow_side", "with_flow",
-            "order_id", "fill_status", "fill_price", "settled",
-            "winner_side", "payout_usd", "pnl_usd",
-        ])
-        self._init_if_missing("decisions", [
-            "ts", "slug", "sec_from_start", "phase",
-            "bot40_decision", "bot40_note",
-            "bot120_decision", "bot120_note",
-            "btc", "target", "distance", "flow_side",
-            "up_bid", "up_ask", "down_bid", "down_ask",
-        ])
-        self._init_if_missing("errors", ["ts", "where", "error"])
-        self._init_if_missing("events", ["ts", "event", "detail"])
-        self._init_if_missing("pnl", [
-            "date", "trades", "wins", "losses", "gross_spent", "gross_payout", "net_pnl",
-        ])
-
-    def _init_if_missing(self, key: str, headers: List[str]) -> None:
-        p = self.paths[key]
-        if not p.exists():
-            with open(p, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(headers)
-
-    def _append(self, key: str, row: List) -> None:
-        try:
-            with open(self.paths[key], "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(row)
-        except Exception as e:
-            print(f"{RED}LOG ERROR ({key}): {e}{RESET}")
-
-    def event(self, event: str, detail: str) -> None:
-        self._append("events", [now_local_str(), event, detail])
-
-    def error(self, where: str, err: str) -> None:
-        self._append("errors", [now_local_str(), where, err])
-
-    def decision(self, slug: str, sec: int, phase: str,
-                 bot40_dec: str, bot40_note: str,
-                 bot120_dec: str, bot120_note: str,
-                 btc, target, distance, flow_side,
-                 up_bid, up_ask, down_bid, down_ask) -> None:
-        self._append("decisions", [
-            now_local_str(), slug, sec, phase,
-            bot40_dec, bot40_note, bot120_dec, bot120_note,
-            btc, target, distance, flow_side,
-            up_bid, up_ask, down_bid, down_ask,
-        ])
-
-    def trade(self, fo: FilledOrder, fill_status: str, fill_price: Optional[float]) -> None:
-        self._append("trades", [
-            fo.placed_ts, int(fo.dry_run), fo.bot, fo.market_slug, fo.market_epoch,
-            fo.sec_from_start, fo.side, fo.price, fo.spent_usd, fo.size_shares,
-            fo.btc_price_at_entry, fo.target_price_at_entry, fo.distance_at_entry,
-            fo.flow_side_at_entry, fo.with_flow, fo.order_id, fill_status, fill_price,
-            int(fo.settled), fo.winner_side, fo.payout_usd, fo.pnl_usd,
-        ])
-
-    def pnl_daily(self, d: str, trades: int, wins: int, losses: int,
-                  gross_spent: float, gross_payout: float, net: float) -> None:
-        self._append("pnl", [d, trades, wins, losses,
-                             round(gross_spent, 4), round(gross_payout, 4), round(net, 4)])
-
-
-# =============================================================================
-# WALLET / CLOB CLIENT WRAPPER
-# =============================================================================
-class Wallet:
-    def __init__(self, dry_run: bool, logger: LiveLogger):
-        self.dry_run = dry_run
-        self.logger = logger
-        self.private_key: Optional[str] = None
-        self.address: Optional[str] = None
-        self.rpc_url: Optional[str] = None
-        self.client = None
-        self.api_creds = None
-
-    def load_env(self, env_paths: List[Path]) -> None:
-        # Try each .env path
-        if load_dotenv is not None:
-            for p in env_paths:
-                if p.exists():
-                    load_dotenv(dotenv_path=str(p), override=True)
-        # support both naming conventions
-        self.private_key = os.environ.get("WALLET_PRIVATE_KEY") or os.environ.get("MY_PRIVATE_KEY")
-        self.address = os.environ.get("WALLET_ADDRESS") or os.environ.get("MY_ADDRESS")
-        self.rpc_url = os.environ.get("POLYGON_RPC_URL")
-        if not self.private_key:
-            print(f"{YELLOW}WARNING: no private key in env (looked for WALLET_PRIVATE_KEY / MY_PRIVATE_KEY).{RESET}")
-            print(f"{YELLOW}  Dry-run will still work; live mode will fail.{RESET}")
-
-    def connect(self) -> bool:
-        """Initialize CLOB client. Only needed for live mode. Returns True on success."""
-        if self.dry_run:
-            return True
-        if not HAS_CLOB:
-            print(f"{RED}py-clob-client not installed. Run: pip install py-clob-client{RESET}")
-            return False
-        if not self.private_key:
-            print(f"{RED}Cannot connect to CLOB: no private key in .env{RESET}")
-            return False
-        try:
-            self.client = ClobClient(host=CLOB_HOST, key=self.private_key, chain_id=POLYGON_CHAIN_ID)
-            try:
-                self.api_creds = self.client.create_or_derive_api_creds()
-                self.client.set_api_creds(self.api_creds)
-            except Exception as e:
-                self.logger.error("clob_api_creds", f"{type(e).__name__}: {e}")
-                print(f"{RED}Failed to create/derive API creds: {e}{RESET}")
-                return False
-            self.logger.event("CLOB_CONNECTED", f"address={self.address}")
-            return True
-        except Exception as e:
-            self.logger.error("clob_connect", f"{type(e).__name__}: {e}")
-            print(f"{RED}CLOB connect failed: {e}{RESET}")
-            return False
-
-    def get_usdc_balance(self) -> Optional[float]:
-        """Return USDC balance available for trading. Approximate via CLOB if possible."""
-        if self.dry_run or self.client is None:
-            return None
-        try:
-            # py-clob-client exposes get_balance_allowance for USDC.
-            ba = self.client.get_balance_allowance({"asset_type": "COLLATERAL"})
-            bal = ba.get("balance") if isinstance(ba, dict) else None
-            return safe_float(bal) / 1_000_000.0 if bal is not None else None
-        except Exception as e:
-            self.logger.error("get_usdc_balance", f"{type(e).__name__}: {e}")
-            return None
-
-    def place_buy(self, token_id: str, price: float, size_shares: float) -> Tuple[Optional[str], str]:
-        """
-        Place a GTC buy limit order.
-        Returns (order_id, status). status: 'placed', 'rejected:<reason>', 'error:<reason>', 'dry_run'.
-        """
-        if self.dry_run:
-            return ("DRYRUN", "dry_run")
-        if self.client is None:
-            return (None, "rejected:not_connected")
-        try:
-            args = OrderArgs(
-                price=round(float(price), 4),
-                size=round(float(size_shares), 4),
-                side="BUY",
-                token_id=token_id,
-            )
-            signed = self.client.create_order(args)
-            resp = self.client.post_order(signed)
-            if isinstance(resp, dict):
-                if resp.get("success"):
-                    return (str(resp.get("orderID") or resp.get("orderId") or "?"), "placed")
-                return (None, f"rejected:{resp.get('errorMsg') or resp}")
-            return (None, "rejected:unexpected_response")
-        except Exception as e:
-            self.logger.error("place_buy", f"{type(e).__name__}: {e}")
-            return (None, f"error:{type(e).__name__}")
-
-    def fetch_open_orders(self) -> List[dict]:
-        if self.dry_run or self.client is None:
-            return []
-        try:
-            return self.client.get_orders() or []
-        except Exception as e:
-            self.logger.error("fetch_open_orders", f"{type(e).__name__}: {e}")
-            return []
-
-
-# =============================================================================
-# BINANCE WS  (BTC/USDT trade ticks)
-# =============================================================================
 class BinanceEngine:
-    def __init__(self, logger: LiveLogger):
-        self.logger = logger
+    def __init__(self) -> None:
         self.price: Optional[float] = None
-        self.update_ts: float = 0.0
-        self.ticks_total: int = 0
-        self.history: Deque[Tuple[float, float]] = deque(maxlen=600)
+        self.updated_at: float = 0.0
         self.status: str = "starting"
+        self.last_trade_ts_ms: Optional[int] = None
+        self._current_bucket_start: Optional[int] = None
+        self._last_trade_in_bucket: Optional[float] = None
+        self.boundary_close_prices: Dict[int, float] = {}
         self._stop = False
-        self.reconnects = 0
 
-    def stop(self) -> None:
-        self._stop = True
+    def snapshot(self) -> dict:
+        return {
+            "price": self.price,
+            "updated_at": self.updated_at,
+            "status": self.status,
+            "last_trade_ts_ms": self.last_trade_ts_ms,
+            "current_bucket_start": self._current_bucket_start,
+            "last_trade_in_bucket": self._last_trade_in_bucket,
+        }
 
-    def age(self) -> Optional[float]:
-        if self.update_ts <= 0:
+    def close_for_boundary(self, boundary_epoch: Optional[int]) -> Optional[float]:
+        if boundary_epoch is None:
             return None
-        return time.time() - self.update_ts
-
-    def is_fresh(self) -> bool:
-        a = self.age()
-        return a is not None and a < STALE_AFTER_SEC
+        try:
+            return self.boundary_close_prices.get(int(boundary_epoch))
+        except Exception:
+            return None
 
     async def run(self) -> None:
         ssl_ctx = ssl.create_default_context()
         while not self._stop:
             try:
-                self.status = "connecting"
-                async with websockets.connect(BINANCE_WS, ssl=ssl_ctx,
-                                              ping_interval=20, ping_timeout=20,
-                                              max_size=2 ** 22) as ws:
+                async with websockets.connect(
+                    BINANCE_WS_URL,
+                    ssl=ssl_ctx,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=2**20,
+                    close_timeout=5,
+                ) as ws:
                     self.status = "live"
-                    self.logger.event("BINANCE_CONNECTED", "")
-                    async for raw in ws:
-                        if self._stop:
-                            return
-                        try:
-                            msg = json.loads(raw)
-                        except Exception:
-                            continue
-                        price = safe_float(msg.get("p"))
-                        if price is None:
-                            continue
-                        now_ts = time.time()
-                        self.price = price
-                        self.update_ts = now_ts
-                        self.ticks_total += 1
-                        self.history.append((now_ts, price))
-            except Exception as e:
-                self.reconnects += 1
+                    while not self._stop:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        msg = json.loads(raw)
+                        px = msg.get("p") or msg.get("price")
+                        if px is not None:
+                            trade_px = float(px)
+                            trade_ts_ms = int(msg.get("T") or msg.get("E") or int(time.time() * 1000))
+                            bucket_start = (trade_ts_ms // 1000 // 300) * 300
+                            if self._current_bucket_start is None:
+                                self._current_bucket_start = bucket_start
+                            elif bucket_start != self._current_bucket_start:
+                                if self._last_trade_in_bucket is not None:
+                                    self.boundary_close_prices[self._current_bucket_start + 300] = float(self._last_trade_in_bucket)
+                                    if len(self.boundary_close_prices) > 2000:
+                                        oldest = sorted(self.boundary_close_prices.keys())[:-1000]
+                                        for k in oldest:
+                                            self.boundary_close_prices.pop(k, None)
+                                self._current_bucket_start = bucket_start
+                            self._last_trade_in_bucket = trade_px
+                            self.last_trade_ts_ms = trade_ts_ms
+                            self.price = trade_px
+                            self.updated_at = time.time()
+            except asyncio.TimeoutError:
+                self.status = "timeout"
+            except Exception:
                 self.status = "reconnecting"
-                self.logger.error("binance", f"{type(e).__name__}: {e}")
                 await asyncio.sleep(2)
 
+    def stop(self) -> None:
+        self._stop = True
 
-# =============================================================================
-# POLYMARKET MARKET MANAGER  (current 5-min market, target, tokens)
-# =============================================================================
-class MarketManager:
-    def __init__(self, logger: LiveLogger):
+
+class DualResearchLogger:
+    def __init__(self, data_dir: str = DATA_DIR) -> None:
+        self.data_dir = data_dir
+        self.paths: Dict[str, str] = {}
+
+    def clear_and_init(self) -> None:
+        if os.path.exists(self.data_dir):
+            shutil.rmtree(self.data_dir)
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.paths = {
+            "events": os.path.join(self.data_dir, "events.csv"),
+            "bot40_signals": os.path.join(self.data_dir, "bot40_signals.csv"),
+            "bot120_signals": os.path.join(self.data_dir, "bot120_signals.csv"),
+            "bot40_virtual_buys": os.path.join(self.data_dir, "bot40_virtual_buys.csv"),
+            "bot120_virtual_buys": os.path.join(self.data_dir, "bot120_virtual_buys.csv"),
+            "bot40_settlements": os.path.join(self.data_dir, "bot40_settlements.csv"),
+            "bot120_settlements": os.path.join(self.data_dir, "bot120_settlements.csv"),
+            "bot40_research": os.path.join(self.data_dir, "bot40_research.csv"),
+            "bot120_research": os.path.join(self.data_dir, "bot120_research.csv"),
+            "trade_outcomes": os.path.join(self.data_dir, "trade_outcomes.csv"),
+        }
+        headers = {
+            "events": ["ts", "slug", "event", "detail"],
+            "signals": [
+                "ts", "bot", "slug", "market_suffix", "sec_from_start", "window_open",
+                "up_best_bid", "up_best_ask", "down_best_bid", "down_best_ask",
+                "btc_price", "target_price", "distance_to_target", "decision", "note",
+            ],
+            "virtual_buys": [
+                "ts", "bot", "slug", "sec_from_start", "side", "mode", "price_limit", "spent_usd", "filled_qty",
+                "avg_fill_price", "best_ask", "best_bid_now", "available_notional_le_threshold",
+                "available_qty_le_threshold", "btc_price", "target_price", "distance_to_target",
+                "limit_031_filled", "limit_fill_sec", "fallback_used", "fallback_fill_sec", "fallback_fill_price", "note",
+            ],
+            "settlements": [
+                "ts", "bot", "slug", "winner_side", "btc_price", "target_price", "spent_total",
+                "payout_total", "pnl_total", "up_qty", "down_qty", "result",
+            ],
+            "bot40_research": [
+                "ts", "slug", "sec_from_start", "price_level", "btc_price", "target_price", "distance_to_target",
+                "flow_side", "up_best_ask", "down_best_ask", "up_qty_le_level", "up_notional_le_level",
+                "down_qty_le_level", "down_notional_le_level", "eligible_side", "note",
+            ],
+            "bot120_research": [
+                "ts", "slug", "sec_from_start", "distance_level", "btc_price", "target_price", "distance_to_target",
+                "flow_side", "flow_best_ask", "flow_best_bid", "flow_total_ask_qty", "flow_total_ask_notional",
+                "would_trigger", "note",
+            ],
+            "trade_outcomes": [
+                "entry_ts", "settle_ts", "bot", "slug", "sec_from_start", "buy_side", "winner_side", "result",
+                "spent_usd", "qty", "avg_fill_price", "payout", "pnl",
+                "entry_btc_price", "entry_target_price", "entry_distance_signed", "entry_flow_side", "entry_with_flow",
+                "entry_best_ask", "entry_best_bid", "settle_btc_price", "settle_target_price",
+            ],
+        }
+        self._init_csv(self.paths["events"], headers["events"])
+        self._init_csv(self.paths["bot40_signals"], headers["signals"])
+        self._init_csv(self.paths["bot120_signals"], headers["signals"])
+        self._init_csv(self.paths["bot40_virtual_buys"], headers["virtual_buys"])
+        self._init_csv(self.paths["bot120_virtual_buys"], headers["virtual_buys"])
+        self._init_csv(self.paths["bot40_settlements"], headers["settlements"])
+        self._init_csv(self.paths["bot120_settlements"], headers["settlements"])
+        self._init_csv(self.paths["bot40_research"], headers["bot40_research"])
+        self._init_csv(self.paths["bot120_research"], headers["bot120_research"])
+        self._init_csv(self.paths["trade_outcomes"], headers["trade_outcomes"])
+
+    @staticmethod
+    def _init_csv(path: str, headers: List[str]) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(headers)
+
+    @staticmethod
+    def _append_csv(path: str, row: List) -> None:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(row)
+
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def log_event(self, slug: str, event: str, detail: str) -> None:
+        self._append_csv(self.paths["events"], [self._ts(), slug, event, detail])
+
+    def log_signal(self, bot: BotState, slug: str, market_suffix: int, sec: int,
+                   up_bid: Optional[float], up_ask: Optional[float], down_bid: Optional[float], down_ask: Optional[float],
+                   btc_price: Optional[float], target_price: Optional[float], distance: Optional[float]) -> None:
+        path = self.paths[f"{bot.name.lower()}_signals"]
+        self._append_csv(path, [
+            self._ts(), bot.name, slug, market_suffix, sec,
+            int(bot.start_sec <= sec <= bot.end_sec),
+            up_bid, up_ask, down_bid, down_ask,
+            btc_price, target_price, distance, bot.last_decision, bot.last_note,
+        ])
+
+    def log_virtual_buy(self, bot: BotState, slug: str, sec: int, side: str, mode: str, price_limit: float,
+                        spent: float, qty: float, avg_fill: float, best_ask: Optional[float], best_bid_now: Optional[float],
+                        avail_notional: Optional[float], avail_qty: Optional[float], btc_price: Optional[float],
+                        target_price: Optional[float], distance: Optional[float],
+                        limit_031_filled: int, limit_fill_sec: Optional[int], fallback_used: int,
+                        fallback_fill_sec: Optional[int], fallback_fill_price: Optional[float], note: str) -> None:
+        path = self.paths[f"{bot.name.lower()}_virtual_buys"]
+        self._append_csv(path, [
+            self._ts(), bot.name, slug, sec, side, mode, price_limit, round(spent, 6), round(qty, 6), round(avg_fill, 6),
+            best_ask, best_bid_now, avail_notional, avail_qty, btc_price, target_price, distance,
+            limit_031_filled, limit_fill_sec, fallback_used, fallback_fill_sec, fallback_fill_price, note,
+        ])
+
+    def log_settlement(self, bot: BotState, slug: str, winner_side: str, btc_price: Optional[float], target_price: Optional[float],
+                       spent_total: float, payout_total: float, pnl_total: float, up_qty: float, down_qty: float, result: str) -> None:
+        path = self.paths[f"{bot.name.lower()}_settlements"]
+        self._append_csv(path, [
+            self._ts(), bot.name, slug, winner_side, btc_price, target_price,
+            round(spent_total, 6), round(payout_total, 6), round(pnl_total, 6),
+            round(up_qty, 6), round(down_qty, 6), result,
+        ])
+
+    def log_bot40_research(self, slug: str, sec: int, price_level: float, btc_price: Optional[float], target_price: Optional[float],
+                           distance: Optional[float], flow_side: Optional[str], up_best_ask: Optional[float], down_best_ask: Optional[float],
+                           up_qty: Optional[float], up_notional: Optional[float], down_qty: Optional[float], down_notional: Optional[float],
+                           eligible_side: Optional[str], note: str) -> None:
+        self._append_csv(self.paths["bot40_research"], [
+            self._ts(), slug, sec, price_level, btc_price, target_price, distance, flow_side,
+            up_best_ask, down_best_ask, up_qty, up_notional, down_qty, down_notional, eligible_side, note,
+        ])
+
+    def log_bot120_research(self, slug: str, sec: int, distance_level: float, btc_price: Optional[float], target_price: Optional[float],
+                            distance: Optional[float], flow_side: Optional[str], flow_best_ask: Optional[float], flow_best_bid: Optional[float],
+                            flow_total_qty: Optional[float], flow_total_notional: Optional[float], would_trigger: int, note: str) -> None:
+        self._append_csv(self.paths["bot120_research"], [
+            self._ts(), slug, sec, distance_level, btc_price, target_price, distance, flow_side,
+            flow_best_ask, flow_best_bid, flow_total_qty, flow_total_notional, would_trigger, note,
+        ])
+
+    def log_trade_outcome(self, bot_name: str, slug: str, pos: "VirtualPosition", winner_side: str,
+                          result: str, payout: float, pnl: float,
+                          settle_btc_price: Optional[float], settle_target_price: Optional[float]) -> None:
+        self._append_csv(self.paths["trade_outcomes"], [
+            pos.entry_ts or self._ts(), self._ts(), bot_name, slug, pos.sec, pos.side, winner_side, result,
+            round(pos.spent, 6), round(pos.qty, 6), round(pos.avg_fill, 6), round(payout, 6), round(pnl, 6),
+            pos.entry_btc_price, pos.entry_target_price, pos.entry_distance,
+            pos.entry_flow_side, pos.entry_with_flow,
+            pos.entry_best_ask, pos.entry_best_bid, settle_btc_price, settle_target_price,
+        ])
+
+
+class Polymarket5mDualBot:
+    def __init__(self, binance_engine: BinanceEngine, logger: DualResearchLogger):
+        self.binance = binance_engine
         self.logger = logger
-        self.base_slug: Optional[str] = None
-        self.market: Optional[MarketInfo] = None
-        self.loaded_epoch: Optional[int] = None
-        self.last_rollover: str = "-"
-        self.target_status: str = "idle"
-        self.target_attempts: int = 0
-        self._stop = False
+        self.current = {
+            "input_url": None,
+            "prefix": None,
+            "base_suffix": None,
+            "current_suffix": None,
+            "slug": None,
+            "url": None,
+            "yes_token": None,
+            "no_token": None,
+            "question": None,
+            "end_date": None,
+            "target_price": None,
+            "target_source": None,
+            "target_event_meta": None,
+            "target_line": None,
+            "target_strike": None,
+            "target_question": None,
+            "target_rendered_page": None,
+            "target_binance_prev_5m_close": None,
+            "target_binance_open": None,
+            "render_retry_attempts": 0,
+            "render_retry_last_sec": None,
+            "render_retry_status": "idle",
+            "render_retry_last_source": "-",
+            "render_retry_last_error": "-",
+        }
+        self.prices = {
+            "UP": {"best_bid": None, "best_ask": None, "last_trade": None, "updated_at": 0.0, "asks": []},
+            "DOWN": {"best_bid": None, "best_ask": None, "last_trade": None, "updated_at": 0.0, "asks": []},
+        }
+        self.meta = {"markets_scanned": 0, "last_rollover": "-"}
+        self.bot40 = BotState(name="BOT40", start_sec=0, end_sec=BOT40_MAX_SEC)
+        self.bot120 = BotState(name="BOT120", start_sec=BOT120_MIN_SEC, end_sec=BOT120_MAX_SEC)
         self._render_task: Optional[asyncio.Task] = None
-        self._render_for_epoch: Optional[int] = None  # which market epoch the in-flight render is for
 
-    def _kickoff_render(self) -> None:
-        """V3-style: spawn a background render task without blocking the main loop."""
-        if not HAS_PLAYWRIGHT:
-            return
-        if self.market is None or self.market.target_price is not None:
-            return
-        # if a task is already running for THIS market, don't spawn another
-        if (self._render_task is not None and not self._render_task.done()
-                and self._render_for_epoch == self.market.market_epoch):
-            return
-        self._render_for_epoch = self.market.market_epoch
-        self._render_task = asyncio.create_task(self._render_capture(self.market.market_epoch))
+    @staticmethod
+    def now_local_str() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    async def _render_capture(self, for_epoch: int) -> None:
-        """Background task: render the current market URL with Playwright, store target if found.
-        Slug-stale guard: only writes the result if the bot is STILL on the same market epoch."""
+    @staticmethod
+    def safe_float(x):
         try:
-            if self.market is None:
-                return
-            url = self.market.url
-            target_val, src = await extract_target_from_rendered_page(url)
-            # stale guard: market may have rolled while we were rendering
-            if self.market is None or self.market.market_epoch != for_epoch:
-                self.logger.event("RENDER_STALE", f"epoch={for_epoch} discarded (rollover)")
-                return
-            if target_val is not None and self.market.target_price is None:
-                self.market.target_price = float(target_val)
-                self.market.target_source = src
-                self.target_status = "captured"
-                self.logger.event("TARGET_CAPTURED",
-                                  f"slug={self.market.slug} target={target_val} src={src}")
-            elif target_val is None:
-                self.target_status = f"render_failed ({src})"
-        except Exception as e:
-            self.logger.error("render_capture", f"{type(e).__name__}: {e}")
-
-    def stop(self) -> None:
-        self._stop = True
-
-    def sec_from_start(self) -> Optional[int]:
-        if self.market is None:
+            v = float(x)
+            if math.isfinite(v):
+                return v
             return None
-        return max(0, now_epoch_s() - int(self.market.market_epoch))
+        except Exception:
+            return None
 
-    def fetch_by_slug(self, slug: str) -> Optional[MarketInfo]:
+    @staticmethod
+    def fmt(x, digits=3):
+        if x is None:
+            return "-"
         try:
-            r = requests.get(GAMMA_MARKETS, params={"slug": slug}, timeout=HTTP_TIMEOUT)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            self.logger.error("gamma_fetch", f"slug={slug} {type(e).__name__}: {e}")
+            return f"{float(x):.{digits}f}"
+        except Exception:
+            return str(x)
+
+    @staticmethod
+    def clear_screen() -> None:
+        print("\033[2J\033[H", end="")
+
+    def parse_initial_url(self, url: str) -> Tuple[str, str, int]:
+        url = url.strip()
+        if "/event/" not in url:
+            raise ValueError("URL must contain /event/")
+        slug = url.split("/event/")[1].strip().strip("/")
+        suffix = slug.split("-")[-1]
+        if not suffix.isdigit():
+            raise ValueError("Bad slug format")
+        prefix = slug[:-(len(suffix))]
+        return slug, prefix, int(suffix)
+
+    def build_slug_from_suffix(self, prefix: str, suffix: int) -> str:
+        return f"{prefix}{suffix}"
+
+    def build_url_from_slug(self, slug: str) -> str:
+        return f"https://polymarket.com/event/{slug}"
+
+    def seconds_from_market_start(self) -> int:
+        if self.current["current_suffix"] is None:
+            return 0
+        return max(0, int(time.time()) - int(self.current["current_suffix"]))
+
+    def current_phase(self) -> str:
+        sec = self.seconds_from_market_start()
+        if 0 <= sec <= BOT40_MAX_SEC:
+            return "BOT40"
+        if BOT120_MIN_SEC <= sec <= BOT120_MAX_SEC:
+            return "BOT120"
+        return "CLOSED"
+
+    def extract_target_from_question(self, question: str) -> Optional[float]:
+        if not question:
             return None
-        markets = data["markets"] if isinstance(data, dict) and "markets" in data else data
-        if not markets:
-            return None
-        m0 = markets[0]
-        question = m0.get("question") or m0.get("title") or ""
-        start_iso = m0.get("startDate") or ""
-        end_iso = m0.get("endDate") or ""
-        # tokens
-        raw_ids = m0.get("clobTokenIds") or []
-        token_ids: List[str] = []
-        if isinstance(raw_ids, str):
+        m = re.search(r"(?:above|below)\s*\$?([0-9]{2,3}(?:,[0-9]{3})+|[0-9]{4,})", question, re.IGNORECASE)
+        if m:
             try:
-                parsed = json.loads(raw_ids)
-                token_ids = [str(x) for x in parsed] if isinstance(parsed, list) else \
-                    [x.strip() for x in raw_ids.split(",") if x.strip()]
+                return float(m.group(1).replace(",", ""))
             except Exception:
-                token_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
-        elif isinstance(raw_ids, list):
-            token_ids = [str(x) for x in raw_ids]
-        # outcomes
-        outcomes = m0.get("outcomes") or []
-        if isinstance(outcomes, str):
-            try:
-                p = json.loads(outcomes)
-                outcomes = p if isinstance(p, list) else []
-            except Exception:
-                outcomes = [x.strip() for x in outcomes.split(",") if x.strip()]
-        outcome_map: Dict[str, str] = {}
-        for i, name in enumerate(outcomes):
-            if i < len(token_ids):
-                outcome_map[str(name).strip().upper()] = str(token_ids[i])
-        up_token = outcome_map.get("UP")
-        down_token = outcome_map.get("DOWN")
-        if (not up_token or not down_token) and len(token_ids) >= 2:
-            up_token = up_token or str(token_ids[0])
-            down_token = down_token or str(token_ids[1])
-        # target
-        target = parse_target_from_market_obj(m0)
-        if target is None:
-            target = parse_target_from_question(question)
-        if target is None:
-            target = extract_target_from_html(event_url_from_slug(slug))
-        suffix_match = re.search(r"(\d+)$", slug)
-        suffix = int(suffix_match.group(1)) if suffix_match else floor_to_5m_epoch()
-        return MarketInfo(slug=slug, suffix=suffix, market_epoch=suffix,
-                          url=event_url_from_slug(slug),
-                          question=question, start_iso=start_iso, end_iso=end_iso,
-                          target_price=target, up_token=up_token, down_token=down_token)
-
-    async def rollover_loop(self, initial_slug: str) -> None:
-        self.base_slug = initial_slug
-        # initial load
-        first = self.fetch_by_slug(initial_slug)
-        if first is None:
-            self.logger.error("rollover_initial", f"slug={initial_slug} not found")
-            print(f"{RED}Initial market not found via Gamma. Check the URL.{RESET}")
-            self._stop = True
-            return
-        first.loaded_at = time.time()
-        self.market = first
-        self.loaded_epoch = first.market_epoch
-        self.logger.event("MARKET_LOADED",
-                          f"slug={first.slug} target={first.target_price}")
-        # if Gamma/HTML didn't return a target, kick off background render
-        if first.target_price is None:
-            self._kickoff_render()
-
-        while not self._stop:
-            try:
-                desired = floor_to_5m_epoch()
-                if self.loaded_epoch != desired:
-                    old = self.loaded_epoch
-                    desired_slug = slug_with_new_suffix(self.base_slug, desired)
-                    fetched = None
-                    for ep in (desired, desired + 300, desired - 300):
-                        if ep <= 0:
-                            continue
-                        fetched = self.fetch_by_slug(slug_with_new_suffix(self.base_slug, ep))
-                        if fetched is not None:
-                            break
-                    if fetched is not None:
-                        fetched.loaded_at = time.time()
-                        self.market = fetched
-                        self.loaded_epoch = fetched.market_epoch
-                    else:
-                        self.market = MarketInfo(slug=desired_slug, suffix=desired,
-                                                  market_epoch=desired,
-                                                  url=event_url_from_slug(desired_slug),
-                                                  loaded_at=time.time())
-                        self.loaded_epoch = desired
-                    self.last_rollover = f"{old} -> {self.loaded_epoch}"
-                    self.target_attempts = 0
-                    self.target_status = "captured" if (self.market and self.market.target_price) else "trying"
-                    self.logger.event("MARKET_ROLLOVER",
-                                      f"new_slug={self.market.slug} target={self.market.target_price}")
-                    # always kick off a render on rollover if we don't have a target yet
-                    if self.market and self.market.target_price is None:
-                        self._kickoff_render()
-                # ongoing target retry: cheap path (Gamma+HTML), then ensure render is in flight
-                if self.market and self.market.target_price is None:
-                    self.target_attempts += 1
-                    if self.target_status not in ("rendering", "captured"):
-                        self.target_status = "trying"
-                    # cheap retry every cycle (~0.5s) — Gamma might come online late
-                    if self.target_attempts % 6 == 1:  # try Gamma/HTML every ~3s, not every 0.5s
-                        refreshed = self.fetch_by_slug(self.market.slug)
-                        if refreshed and refreshed.target_price is not None:
-                            self.market.target_price = refreshed.target_price
-                            self.market.up_token = refreshed.up_token or self.market.up_token
-                            self.market.down_token = refreshed.down_token or self.market.down_token
-                            self.target_status = "captured"
-                            self.logger.event("TARGET_CAPTURED",
-                                              f"slug={self.market.slug} target={self.market.target_price} src=gamma_or_html")
-                    # ensure a render task is running in the background (non-blocking)
-                    self._kickoff_render()
-                    if (self._render_task is not None and not self._render_task.done()
-                            and self._render_for_epoch == self.market.market_epoch):
-                        self.target_status = "rendering"
-                else:
-                    self.target_status = "captured" if (self.market and self.market.target_price) else "missing"
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                self.logger.error("rollover_loop", f"{type(e).__name__}: {e}")
-                await asyncio.sleep(2)
-
-
-# =============================================================================
-# POLYMARKET ORDER BOOK FEED
-# =============================================================================
-class OrderBookFeed:
-    def __init__(self, market_mgr: MarketManager, logger: LiveLogger):
-        self.market_mgr = market_mgr
-        self.logger = logger
-        self.up = OrderBookSide()
-        self.down = OrderBookSide()
-        self.status = "starting"
-        self.updates_total = 0
-        self.reconnects = 0
-        self._stop = False
-
-    def stop(self) -> None:
-        self._stop = True
-
-    def side_for_token(self, asset_id: str) -> Optional[Tuple[str, OrderBookSide]]:
-        m = self.market_mgr.market
-        if m is None:
-            return None
-        if m.up_token and asset_id == str(m.up_token):
-            return ("UP", self.up)
-        if m.down_token and asset_id == str(m.down_token):
-            return ("DOWN", self.down)
+                return None
         return None
 
-    def _levels(self, ev: dict, key: str) -> List[Tuple[float, float]]:
-        levels = ev.get(key) or []
-        out: List[Tuple[float, float]] = []
-        if not isinstance(levels, list):
-            return out
-        for level in levels:
-            px = qty = None
-            if isinstance(level, dict):
-                px = safe_float(level.get("price") or level.get("px"))
-                qty = safe_float(level.get("size") or level.get("amount") or level.get("quantity") or level.get("qty"))
-            elif isinstance(level, (list, tuple)) and len(level) >= 2:
-                px = safe_float(level[0])
-                qty = safe_float(level[1])
-            if px is None or qty is None:
-                continue
-            out.append((px, qty))
-        return out
 
-    def _update_side(self, side: OrderBookSide, ev: dict) -> None:
-        bid = safe_float(ev.get("best_bid") or ev.get("bid") or ev.get("b"))
-        ask = safe_float(ev.get("best_ask") or ev.get("ask") or ev.get("a"))
-        last = safe_float(ev.get("price") or ev.get("last_trade") or ev.get("last") or ev.get("p"))
+    def extract_target_from_page(self, url: str) -> Optional[float]:
+        try:
+            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            html = r.text
+        except Exception:
+            return None
+
+        patterns = [
+            r'Price\s*to\s*Beat[^\d$]{0,40}\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
+            r'PRICE\s*TO\s*BEAT[^\d$]{0,40}\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
+            r'priceToBeat[^0-9]{0,20}([0-9]{1,3}(?:,[0-9]{3})*\.\d+)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, html, re.IGNORECASE | re.DOTALL)
+            if m:
+                try:
+                    return float(m.group(1).replace(",", ""))
+                except Exception:
+                    pass
+        return None
+
+    async def extract_target_from_rendered_page(self, url: str) -> Tuple[Optional[float], str, str]:
+        if async_playwright is None:
+            return None, "-", "playwright_missing"
+        browser = None
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page(viewport={"width": 1400, "height": 1200})
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(1200)
+                text_blocks = []
+                for target in ["body", "main"]:
+                    try:
+                        txt = await page.text_content(target)
+                        if txt:
+                            text_blocks.append(txt)
+                    except Exception:
+                        pass
+                try:
+                    html = await page.content()
+                    if html:
+                        text_blocks.append(html)
+                except Exception:
+                    pass
+                rendered_text = "\n".join(text_blocks)
+                patterns = [
+                    (r'Price\s*to\s*Beat\s*\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)', "body_price_to_beat"),
+                    (r'Price\s*To\s*Beat\s*\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)', "body_price_to_beat"),
+                    (r'PRICE\s*TO\s*BEAT\s*\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)', "body_price_to_beat"),
+                    (r'Price\s*to\s*Beat[^\d$]{0,80}\$\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d+)', "body_price_to_beat"),
+                ]
+                for pat, source in patterns:
+                    m = re.search(pat, rendered_text, re.IGNORECASE | re.DOTALL)
+                    if m:
+                        try:
+                            return float(m.group(1).replace(",", "")), source, "-"
+                        except Exception as e:
+                            return None, source, str(e)
+                return None, "-", "not_found"
+        except Exception as e:
+            return None, "-", str(e)
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+    def ensure_target_price(self, slug: str, url: str, question: str, current_target: Optional[float], market_obj: Optional[dict] = None) -> Tuple[Optional[float], Optional[str], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+        if current_target is not None:
+            return current_target, "current", None, None, None, None, None
+
+        event_meta_target = None
+        line_target = None
+        strike_target = None
+        question_target = self.extract_target_from_question(question)
+
+        if market_obj is not None:
+            event_meta = market_obj.get("eventMetadata")
+            if isinstance(event_meta, str):
+                try:
+                    event_meta = json.loads(event_meta)
+                except Exception:
+                    event_meta = {}
+            if not isinstance(event_meta, dict):
+                event_meta = {}
+
+            event_meta_target = self.safe_float(event_meta.get("priceToBeat"))
+            line_target = self.safe_float(market_obj.get("line"))
+            strike_target = self.safe_float(market_obj.get("strikePrice"))
+
+        if event_meta_target is not None:
+            return event_meta_target, "eventMetadata.priceToBeat", event_meta_target, line_target, strike_target, question_target, None
+        if line_target is not None:
+            return line_target, "line", event_meta_target, line_target, strike_target, question_target, None
+        if strike_target is not None:
+            return strike_target, "strikePrice", event_meta_target, line_target, strike_target, question_target, None
+        if question_target is not None:
+            return question_target, "question", event_meta_target, line_target, strike_target, question_target, None
+
+        page_target = self.extract_target_from_page(url)
+        if page_target is not None:
+            try:
+                self.logger.log_event(slug, "TARGET_FROM_PAGE", f"target_price={page_target:.2f}")
+            except Exception:
+                pass
+            return page_target, "page_html", event_meta_target, line_target, strike_target, question_target, page_target
+
+        return None, None, event_meta_target, line_target, strike_target, question_target, None
+
+    def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
+        r = requests.get(f"{GAMMA_MARKETS_BY_SLUG}/slug/{slug}", timeout=20)
+        r.raise_for_status()
+        m = r.json()
+        if not m:
+            return None
+        raw_ids = m.get("clobTokenIds")
+        token_ids = []
+        if isinstance(raw_ids, list):
+            token_ids = raw_ids
+        elif isinstance(raw_ids, str):
+            try:
+                parsed = json.loads(raw_ids)
+                if isinstance(parsed, list):
+                    token_ids = parsed
+            except Exception:
+                token_ids = []
+        if len(token_ids) < 2:
+            return None
+        question = m.get("question") or m.get("title") or ""
+        market_url = self.build_url_from_slug(slug)
+        target_price, target_source, event_meta_target, line_target, strike_target, question_target, rendered_page_target = self.ensure_target_price(
+            slug=slug,
+            url=market_url,
+            question=question,
+            current_target=None,
+            market_obj=m,
+        )
+        return {
+            "slug": slug,
+            "url": market_url,
+            "question": question,
+            "end_date": m.get("endDate"),
+            "yes_token": str(token_ids[0]),
+            "no_token": str(token_ids[1]),
+            "target_price": target_price,
+            "target_source": target_source,
+            "target_event_meta": event_meta_target,
+            "target_line": line_target,
+            "target_strike": strike_target,
+            "target_question": question_target,
+            "target_rendered_page": rendered_page_target,
+            "target_binance_prev_5m_close": None,
+            "target_binance_open": None,
+            "render_retry_attempts": 0,
+            "render_retry_last_sec": None,
+            "render_retry_status": "idle",
+            "render_retry_last_source": "-",
+            "render_retry_last_error": "-",
+        }
+
+    def _capture_binance_open_target(self) -> None:
+        if self.current.get("target_binance_open") is None and self.binance.price is not None:
+            self.current["target_binance_open"] = float(self.binance.price)
+
+    def _capture_binance_prev_5m_close_target(self) -> None:
+        boundary_epoch = self.current.get("current_suffix")
+        close_px = self.binance.close_for_boundary(boundary_epoch)
+        if close_px is not None:
+            self.current["target_binance_prev_5m_close"] = float(close_px)
+
+    async def _capture_rendered_page_target(self) -> None:
+        if self.current.get("target_rendered_page") is not None:
+            self.current["render_retry_status"] = "captured"
+            return
+        slug_at_start = self.current.get("slug")
+        url_at_start = self.current.get("url") or ""
+        self.current["render_retry_status"] = "trying"
+        rendered_target, source, err = await self.extract_target_from_rendered_page(url_at_start)
+        if self.current.get("slug") != slug_at_start:
+            return
+        self.current["render_retry_attempts"] = int(self.current.get("render_retry_attempts") or 0) + 1
+        self.current["render_retry_last_sec"] = self.seconds_from_market_start()
+        self.current["render_retry_last_source"] = source
+        self.current["render_retry_last_error"] = err
+        if rendered_target is not None:
+            self.current["target_rendered_page"] = float(rendered_target)
+            self.current["target_price"] = float(rendered_target)
+            self.current["target_source"] = source or "body_price_to_beat"
+            self.current["render_retry_status"] = "captured"
+            try:
+                self.logger.log_event(self.current.get("slug") or "-", "TARGET_RENDERED_PAGE", f"target_price={rendered_target:.2f} | source={source}")
+            except Exception:
+                pass
+        else:
+            self.current["render_retry_status"] = "retry_wait"
+
+    async def _maybe_retry_rendered_target(self, sec: int) -> None:
+        if self.current.get("target_rendered_page") is not None:
+            self.current["render_retry_status"] = "captured"
+            return
+        if sec < 0:
+            return
+        if sec > RENDER_RETRY_WINDOW_SEC:
+            if self.current.get("render_retry_status") != "fallback":
+                self.current["render_retry_status"] = "fallback"
+            return
+        last_sec = self.current.get("render_retry_last_sec")
+        if last_sec is not None and (sec - int(last_sec)) < RENDER_RETRY_INTERVAL_SEC:
+            return
+        self._kickoff_render_target()
+
+    def _resolve_target_in_use(self) -> Tuple[Optional[float], Optional[str]]:
+        target = self.current.get("target_rendered_page")
+        if target is not None:
+            return target, "rendered_page"
+        for key, src in (
+            ("target_event_meta", "event_meta_temp"),
+            ("target_line", "line_temp"),
+            ("target_strike", "strike_temp"),
+            ("target_question", "question_temp"),
+        ):
+            v = self.current.get(key)
+            if v is not None:
+                return float(v), src
+        return None, None
+
+    def _kickoff_render_target(self) -> None:
+        if self.current.get("target_rendered_page") is not None:
+            return
+        if self._render_task is not None and not self._render_task.done():
+            return
+        self._render_task = asyncio.create_task(self._capture_rendered_page_target())
+
+    async def load_initial_market_from_user(self) -> None:
+        print("הדבק כתובת שוק 5 דקות")
+        url = input().strip()
+        slug, prefix, suffix = self.parse_initial_url(url)
+        self.current.update({
+            "input_url": url,
+            "prefix": prefix,
+            "base_suffix": suffix,
+            "current_suffix": suffix,
+            "slug": slug,
+            "url": self.build_url_from_slug(slug),
+        })
+        market = self.fetch_market_by_slug(slug)
+        if not market:
+            raise RuntimeError(f"לא נמצא שוק עבור slug: {slug}")
+        self.current.update(market)
+        self.current["market_loaded_at"] = time.time()
+        self._capture_binance_prev_5m_close_target()
+        self._capture_binance_open_target()
+        await self._capture_rendered_page_target()
+        self.logger.log_event(slug, "INIT", f"initial slug={slug} up={market['yes_token']} down={market['no_token']}")
+
+    def side_from_asset(self, asset_id: str) -> Optional[str]:
+        if str(asset_id) == str(self.current["yes_token"]):
+            return "UP"
+        if str(asset_id) == str(self.current["no_token"]):
+            return "DOWN"
+        return None
+
+    def update_from_best_bid_ask(self, msg: dict) -> None:
+        asset_id = str(msg.get("asset_id") or "")
+        side = self.side_from_asset(asset_id)
+        if not side:
+            return
+        bid = self.safe_float(msg.get("best_bid"))
+        ask = self.safe_float(msg.get("best_ask"))
         if bid is not None:
-            side.bid = bid
+            self.prices[side]["best_bid"] = bid
         if ask is not None:
-            side.ask = ask
-        if last is not None:
-            side.last = last
-        asks = self._levels(ev, "asks")
-        if asks:
-            asks.sort(key=lambda x: x[0])
-            side.ask_levels = asks
-            side.ask = asks[0][0]
-        side.updated_at = time.time()
-        side.updates += 1
+            self.prices[side]["best_ask"] = ask
+        self.prices[side]["updated_at"] = time.time()
 
-    def _handle_msg(self, raw: str) -> None:
+    def update_from_last_trade(self, msg: dict) -> None:
+        asset_id = str(msg.get("asset_id") or "")
+        side = self.side_from_asset(asset_id)
+        if not side:
+            return
+        px = self.safe_float(msg.get("price"))
+        if px is not None:
+            self.prices[side]["last_trade"] = px
+            self.prices[side]["updated_at"] = time.time()
+
+    def update_from_book_snapshot(self, msg: dict) -> None:
+        asset_id = str(msg.get("asset_id") or "")
+        side = self.side_from_asset(asset_id)
+        if not side:
+            return
+        bids = msg.get("bids") or []
+        asks = msg.get("asks") or []
+        best_bid = None
+        try:
+            if bids:
+                best_bid = max(float(x.get("price")) for x in bids if x.get("price") is not None)
+        except Exception:
+            best_bid = None
+        ask_rows = []
+        try:
+            for x in asks:
+                p = self.safe_float(x.get("price"))
+                s = self.safe_float(x.get("size") or x.get("amount"))
+                if p is not None:
+                    ask_rows.append({"price": p, "size": s})
+            ask_rows.sort(key=lambda z: z["price"])
+        except Exception:
+            ask_rows = []
+        self.prices[side]["asks"] = ask_rows
+        if best_bid is not None:
+            self.prices[side]["best_bid"] = best_bid
+        if ask_rows:
+            self.prices[side]["best_ask"] = ask_rows[0]["price"]
+        self.prices[side]["updated_at"] = time.time()
+
+    def handle_ws_message(self, raw: str) -> None:
         try:
             msg = json.loads(raw)
         except Exception:
             return
-        events: List[dict] = []
         if isinstance(msg, list):
-            events = [x for x in msg if isinstance(x, dict)]
-        elif isinstance(msg, dict):
-            data = msg.get("data")
-            events = data if isinstance(data, list) else [msg]
-        for ev in events:
-            asset = str(ev.get("asset_id") or ev.get("token_id") or ev.get("market") or ev.get("asset") or "")
-            outcome = str(ev.get("outcome") or "").upper()
-            side_state = None
-            side_name = None
-            sd = self.side_for_token(asset)
-            if sd is not None:
-                side_name, side_state = sd
-            elif outcome == "UP":
-                side_name, side_state = "UP", self.up
-            elif outcome == "DOWN":
-                side_name, side_state = "DOWN", self.down
-            if side_state is None:
-                continue
-            self._update_side(side_state, ev)
-            self.updates_total += 1
+            for item in msg:
+                self.handle_ws_message(json.dumps(item))
+            return
+        if msg == {}:
+            return
+        event_type = msg.get("event_type")
+        if event_type == "best_bid_ask":
+            self.update_from_best_bid_ask(msg)
+            return
+        if event_type == "last_trade_price":
+            self.update_from_last_trade(msg)
+            return
+        if "bids" in msg or "asks" in msg:
+            self.update_from_book_snapshot(msg)
+            return
 
-    def reset_for_new_market(self) -> None:
-        self.up = OrderBookSide()
-        self.down = OrderBookSide()
+    def build_subscribe_payload(self) -> dict:
+        return {
+            "type": "market",
+            "assets_ids": [self.current["yes_token"], self.current["no_token"]],
+            "custom_feature_enabled": True,
+        }
 
-    async def run(self) -> None:
-        last_sub_key = None
-        while not self._stop:
+    async def ws_heartbeat(self, ws) -> None:
+        while True:
             try:
-                self.status = "connecting"
-                async with websockets.connect(POLY_BOOK_WS, ping_interval=20, ping_timeout=20,
-                                              max_size=2 ** 24) as ws:
-                    self.status = "connected"
-                    self.logger.event("POLY_CONNECTED", "")
-                    while not self._stop:
-                        m = self.market_mgr.market
-                        if not m or not m.up_token or not m.down_token:
-                            await asyncio.sleep(0.25)
-                            continue
-                        sub_key = (m.slug, m.up_token, m.down_token)
-                        if sub_key != last_sub_key:
-                            self.reset_for_new_market()
-                            payload = {
-                                "type": "market",
-                                "assets_ids": [str(m.up_token), str(m.down_token)],
-                                "custom_feature_enabled": True,
-                            }
-                            await ws.send(json.dumps(payload))
-                            self.logger.event("POLY_SUBSCRIBE",
-                                              f"slug={m.slug} up={m.up_token} down={m.down_token}")
-                            last_sub_key = sub_key
-                            self.status = "live"
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                            if not raw or raw == "{}":
-                                continue
-                            self._handle_msg(raw)
-                        except asyncio.TimeoutError:
-                            try:
-                                await ws.send("{}")
-                            except Exception:
-                                break
-            except Exception as e:
-                self.reconnects += 1
-                self.status = "reconnecting"
-                self.logger.error("poly_book", f"{type(e).__name__}: {e}")
-                await asyncio.sleep(2)
+                await ws.send("{}")
+            except Exception:
+                return
+            await asyncio.sleep(HEARTBEAT_EVERY_SEC)
 
+    def _spread(self, side: str) -> Optional[float]:
+        bid = self.prices[side]["best_bid"]
+        ask = self.prices[side]["best_ask"]
+        if bid is None or ask is None:
+            return None
+        return round(ask - bid, 6)
 
-# =============================================================================
-# SAFETY  (daily loss + wallet cap + kill switch)
-# =============================================================================
-class Safety:
-    def __init__(self, max_daily_loss: float, max_wallet: float, dry_run: bool, logger: LiveLogger):
-        self.max_daily_loss = max_daily_loss
-        self.max_wallet = max_wallet
-        self.dry_run = dry_run
-        self.logger = logger
-        self.daily_pnl = 0.0
-        self.daily_trades = 0
-        self.daily_wins = 0
-        self.daily_losses = 0
-        self.daily_spent = 0.0
-        self.daily_payout = 0.0
-        self.day = today_str()
-        self.killed = False
-        self.kill_reason = ""
+    def _best_ask_qty(self, side: str) -> Tuple[Optional[float], Optional[float]]:
+        asks = self.prices[side]["asks"]
+        if not asks:
+            return None, None
+        best = asks[0]
+        if best.get("size") is None:
+            return None, None
+        qty = float(best["size"])
+        return qty, round(qty * float(best["price"]), 6)
 
-    def _maybe_rollover_day(self) -> None:
-        td = today_str()
-        if td != self.day:
-            self.logger.pnl_daily(self.day, self.daily_trades, self.daily_wins, self.daily_losses,
-                                  self.daily_spent, self.daily_payout, self.daily_pnl)
-            self.day = td
-            self.daily_pnl = 0.0
-            self.daily_trades = 0
-            self.daily_wins = 0
-            self.daily_losses = 0
-            self.daily_spent = 0.0
-            self.daily_payout = 0.0
-            self.killed = False
-            self.kill_reason = ""
+    def _qty_notional_le(self, side: str, level: float) -> Tuple[Optional[float], Optional[float]]:
+        asks = self.prices[side]["asks"]
+        if not asks:
+            return None, None
+        qty = 0.0
+        notional = 0.0
+        found = False
+        for row in asks:
+            if row["price"] <= level and row.get("size") is not None:
+                found = True
+                qty += float(row["size"])
+                notional += float(row["size"]) * float(row["price"])
+        if not found:
+            return 0.0, 0.0
+        return round(qty, 6), round(notional, 6)
 
-    def check_can_trade(self, wallet_balance: Optional[float]) -> Tuple[bool, str]:
-        self._maybe_rollover_day()
-        if self.killed:
-            return (False, f"killed: {self.kill_reason}")
-        if self.daily_pnl <= -self.max_daily_loss:
-            self.killed = True
-            self.kill_reason = f"daily loss {self.daily_pnl:.2f} <= -{self.max_daily_loss:.2f}"
-            self.logger.event("KILL_DAILY_LOSS", self.kill_reason)
-            return (False, self.kill_reason)
-        if (not self.dry_run) and wallet_balance is not None and wallet_balance > self.max_wallet:
-            return (False, f"wallet ${wallet_balance:.2f} > cap ${self.max_wallet:.2f}")
-        return (True, "ok")
-
-    def record_settlement(self, spent: float, payout: float) -> None:
-        self._maybe_rollover_day()
-        self.daily_trades += 1
-        self.daily_spent += spent
-        self.daily_payout += payout
-        pnl = payout - spent
-        self.daily_pnl += pnl
-        if pnl >= 0:
-            self.daily_wins += 1
-        else:
-            self.daily_losses += 1
-
-
-# =============================================================================
-# STRATEGY  (mirror V3 exactly)
-# =============================================================================
-class Strategy:
-    """Decides what to buy. Pure function: given state, returns Decision or None."""
+    def _distance_fields(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        btc = self.binance.price
+        target, source = self._resolve_target_in_use()
+        self.current["target_price"] = target
+        self.current["target_source"] = source
+        if btc is None or target is None:
+            return btc, target, None
+        return btc, target, round(btc - target, 6)
 
     @staticmethod
-    def flow_side_from_distance(distance: Optional[float]) -> Optional[str]:
+    def _flow_side_from_distance(distance: Optional[float]) -> Optional[str]:
         if distance is None:
             return None
         if distance > 0:
@@ -1075,434 +934,675 @@ class Strategy:
             return "DOWN"
         return None
 
-    @staticmethod
-    def evaluate(sec: int, market: MarketInfo, btc: Optional[float],
-                 distance: Optional[float], book: OrderBookFeed,
-                 bot40: BotState, bot120: BotState) -> Tuple[Optional[Decision], str, str]:
-        """
-        Returns (decision_or_none, bot40_note, bot120_note).
-        Note: this evaluates BOTH bots and returns the first valid decision in priority order.
-        """
-        bot40_note = ""
-        bot120_note = ""
-        target = market.target_price
+    def _total_ask_qty_notional(self, side: str) -> Tuple[Optional[float], Optional[float]]:
+        asks = self.prices[side]["asks"]
+        if not asks:
+            return None, None
+        qty = 0.0
+        notional = 0.0
+        for row in asks:
+            size = self.safe_float(row.get("size"))
+            price = self.safe_float(row.get("price"))
+            if size is None or price is None:
+                continue
+            qty += size
+            notional += size * price
+        return round(qty, 6), round(notional, 6)
 
-        flow_side = Strategy.flow_side_from_distance(distance)
-        up = book.up
-        down = book.down
-        loaded_at = market.loaded_at
+    def _bot40_level_and_mode(self, sec: int) -> Tuple[Optional[float], Optional[str]]:
+        """V3-derived helper: in phase 1 we'll buy at any price <= the highest maker
+        level (0.30) to feed downstream logic; in phase 2 we use 0.35 as before.
+        The actual maker placement uses BOT40_MAKER_LEVELS in _setup_bot40_maker_orders.
+        """
+        if sec < 0 or sec > BOT40_MAX_SEC:
+            return None, None
+        if sec <= BOT40_LIMIT_END_SEC:
+            return max(BOT40_MAKER_LEVELS), "MAKER_PHASE1"
+        return BOT40_FALLBACK_PRICE, "FALLBACK_035"
 
-        # --- BOT40 ---
-        if BOT40_MIN_SEC <= sec <= BOT40_MAX_SEC and not bot40.bought_in_market:
-            if btc is None or target is None or distance is None:
-                bot40_note = "missing btc/target/distance"
-            elif not (up.has_fresh_ask_for_market(loaded_at) or down.has_fresh_ask_for_market(loaded_at)):
-                bot40_note = "no side fresh-for-market"
-            else:
-                price_cap = BOT40_LIMIT_PRICE if sec <= BOT40_LIMIT_END_SEC else BOT40_FALLBACK_PRICE
-                eligible: List[Tuple[str, float]] = []
-                if up.has_fresh_ask_for_market(loaded_at) and up.ask <= price_cap:
-                    eligible.append(("UP", up.ask))
-                if down.has_fresh_ask_for_market(loaded_at) and down.ask <= price_cap:
-                    eligible.append(("DOWN", down.ask))
-                note = f"price_cap<={price_cap:.2f}"
-                if abs(distance) >= BOT40_FLOW_DIST_THRESHOLD and flow_side is not None:
+    def _simulate_fill_up_to_cap(self, side: str, cap_usd: float, level: float) -> Tuple[float, float, Optional[float]]:
+        asks = self.prices[side]["asks"] or []
+        spent = 0.0
+        qty = 0.0
+        for row in asks:
+            price = self.safe_float(row.get("price"))
+            size = self.safe_float(row.get("size"))
+            if price is None or size is None or price > level or size <= 0:
+                continue
+            remaining = cap_usd - spent
+            if remaining <= 1e-12:
+                break
+            max_qty_here = remaining / price
+            take_qty = min(size, max_qty_here)
+            if take_qty <= 0:
+                continue
+            qty += take_qty
+            spent += take_qty * price
+        if qty <= 1e-12 or spent <= 1e-12:
+            return 0.0, 0.0, None
+        avg = spent / qty
+        return round(spent, 6), round(qty, 6), round(avg, 6)
+
+    def _side_has_fresh_ask_for_current_market(self, side: str) -> bool:
+        ask = self.prices[side]["best_ask"]
+        updated_at = self.prices[side]["updated_at"]
+        loaded_at = float(self.current.get("market_loaded_at") or 0.0)
+        return ask is not None and updated_at is not None and updated_at >= loaded_at
+
+    def _choose_bot40_side(self, sec: int) -> Optional[str]:
+        level, _mode = self._bot40_level_and_mode(sec)
+        if level is None:
+            return None
+
+        btc, target, distance = self._distance_fields()
+        flow_side = self._flow_side_from_distance(distance)
+
+        if self.bot40.last_buy and self.bot40.current_market_spent < MAX_BUY_USD:
+            existing_side = self.bot40.last_buy["side"]
+            ask = self.prices[existing_side]["best_ask"]
+            if ask is None or ask > level or not self._side_has_fresh_ask_for_current_market(existing_side):
+                return None
+            if distance is not None and abs(distance) >= BOT40_FLOW_DIST_THRESHOLD and flow_side is not None and existing_side != flow_side:
+                return None
+            return existing_side
+
+        eligible = []
+        up_ask = self.prices["UP"]["best_ask"]
+        down_ask = self.prices["DOWN"]["best_ask"]
+        if up_ask is not None and up_ask <= level and self._side_has_fresh_ask_for_current_market("UP"):
+            eligible.append(("UP", up_ask))
+        if down_ask is not None and down_ask <= level and self._side_has_fresh_ask_for_current_market("DOWN"):
+            eligible.append(("DOWN", down_ask))
+
+        if not eligible:
+            return None
+
+        if distance is not None and abs(distance) >= BOT40_FLOW_DIST_THRESHOLD and flow_side is not None:
+            eligible = [x for x in eligible if x[0] == flow_side]
+            if not eligible:
+                return None
+
+        eligible.sort(key=lambda x: x[1])
+        return eligible[0][0]
+
+    def _choose_bot120_side(self, sec: int) -> Optional[str]:
+        if not (BOT120_MIN_SEC <= sec <= BOT120_MAX_SEC):
+            return None
+        btc, target, distance = self._distance_fields()
+        if btc is None or target is None or distance is None:
+            return None
+        if abs(distance) < MIN_DIST_BOT120:
+            return None
+        direction_side = "UP" if distance > 0 else "DOWN"
+        if self.bot120.last_buy and self.bot120.last_buy.get("side") != direction_side:
+            return None
+        ask = self.prices[direction_side]["best_ask"]
+        if ask is None or not self._side_has_fresh_ask_for_current_market(direction_side):
+            return None
+        if ask > BOT120_MAX_PRICE:
+            return None
+        return direction_side
+
+    def _record_bot40_research_for_second(self, sec: int) -> None:
+        if sec not in BOT40_RESEARCH_SECONDS:
+            return
+        btc, target, distance = self._distance_fields()
+        flow_side = self._flow_side_from_distance(distance)
+        up_best_ask = self.prices["UP"]["best_ask"]
+        down_best_ask = self.prices["DOWN"]["best_ask"]
+        for price_level in BOT40_RESEARCH_PRICE_LEVELS:
+            up_qty, up_notional = self._qty_notional_le("UP", price_level)
+            down_qty, down_notional = self._qty_notional_le("DOWN", price_level)
+            eligible = []
+            if up_best_ask is not None and up_best_ask <= price_level:
+                eligible.append(("UP", up_best_ask))
+            if down_best_ask is not None and down_best_ask <= price_level:
+                eligible.append(("DOWN", down_best_ask))
+            note = "free"
+            if distance is not None and abs(distance) >= BOT40_FLOW_DIST_THRESHOLD:
+                note = "flow_only"
+                if flow_side is not None:
                     eligible = [x for x in eligible if x[0] == flow_side]
-                    note = f"price<={price_cap:.2f} flow_only({flow_side})"
-                if eligible:
-                    eligible.sort(key=lambda x: x[1])
-                    side, ask = eligible[0]
-                    bot40_note = f"BUY {side} @<={ask:.4f} ({note})"
-                    return (Decision(bot="BOT40", side=side, price_limit=ask,
-                                      size_usd=DOLLARS_PER_TRADE,
-                                      reason=note),
-                            bot40_note, "BOT40 already firing")
-                bot40_note = f"WAIT no eligible side ({note})"
+            eligible.sort(key=lambda x: x[1])
+            eligible_side = eligible[0][0] if eligible else None
+            self.logger.log_bot40_research(
+                slug=self.current["slug"],
+                sec=sec,
+                price_level=price_level,
+                btc_price=btc,
+                target_price=target,
+                distance=distance,
+                flow_side=flow_side,
+                up_best_ask=up_best_ask,
+                down_best_ask=down_best_ask,
+                up_qty=up_qty,
+                up_notional=up_notional,
+                down_qty=down_qty,
+                down_notional=down_notional,
+                eligible_side=eligible_side,
+                note=note,
+            )
 
-        # --- BOT120 ---
-        if BOT120_MIN_SEC <= sec <= BOT120_MAX_SEC and not bot120.bought_in_market:
-            if btc is None or target is None or distance is None:
-                bot120_note = "missing btc/target/distance"
-            elif abs(distance) < MIN_DIST_BOT120:
-                bot120_note = f"WAIT |dist|={abs(distance):.1f} < {MIN_DIST_BOT120:.0f}"
+    def _record_bot120_research_for_second(self, sec: int) -> None:
+        if sec not in BOT120_RESEARCH_SECONDS:
+            return
+        btc, target, distance = self._distance_fields()
+        flow_side = self._flow_side_from_distance(distance)
+        flow_best_ask = self.prices[flow_side]["best_ask"] if flow_side else None
+        flow_best_bid = self.prices[flow_side]["best_bid"] if flow_side else None
+        flow_total_qty, flow_total_notional = self._total_ask_qty_notional(flow_side) if flow_side else (None, None)
+        for distance_level in BOT120_RESEARCH_DISTANCE_LEVELS:
+            would_trigger = int(
+                btc is not None and target is not None and distance is not None and flow_side is not None and abs(distance) >= distance_level and flow_best_ask is not None
+            )
+            self.logger.log_bot120_research(
+                slug=self.current["slug"],
+                sec=sec,
+                distance_level=distance_level,
+                btc_price=btc,
+                target_price=target,
+                distance=distance,
+                flow_side=flow_side,
+                flow_best_ask=flow_best_ask,
+                flow_best_bid=flow_best_bid,
+                flow_total_qty=flow_total_qty,
+                flow_total_notional=flow_total_notional,
+                would_trigger=would_trigger,
+                note="dir_only_no_price_cap",
+            )
+
+    def _record_signals_for_second(self, sec: int) -> None:
+        btc, target, distance = self._distance_fields()
+        for bot in [self.bot40, self.bot120]:
+            key = sec
+            if key in bot.last_logged_sec_side:
+                continue
+            bot.last_logged_sec_side.add(key)
+            self.logger.log_signal(
+                bot=bot,
+                slug=self.current["slug"],
+                market_suffix=self.current["current_suffix"],
+                sec=sec,
+                up_bid=self.prices["UP"]["best_bid"],
+                up_ask=self.prices["UP"]["best_ask"],
+                down_bid=self.prices["DOWN"]["best_bid"],
+                down_ask=self.prices["DOWN"]["best_ask"],
+                btc_price=btc,
+                target_price=target,
+                distance=distance,
+            )
+
+    def _try_execute_bot_buy(self, bot: BotState, sec: int, side: Optional[str]) -> None:
+        btc, target, distance = self._distance_fields()
+
+        if bot is self.bot120:
+            if distance is None or target is None or btc is None:
+                bot.last_decision = "WAIT"
+                bot.last_note = "missing poly target"
+                return
+            if abs(distance) < MIN_DIST_BOT120:
+                bot.last_decision = "WAIT"
+                bot.last_note = f"dist<{MIN_DIST_BOT120:.0f}"
+                return
+
+        if not (bot.start_sec <= sec <= bot.end_sec):
+            bot.last_decision = "WAIT"
+            bot.last_note = f"outside {bot.start_sec}-{bot.end_sec}"
+            return
+
+        if side is None:
+            bot.last_decision = "WAIT"
+            if bot is self.bot40:
+                level, mode = self._bot40_level_and_mode(sec)
+                if mode == "MAKER_PHASE1":
+                    bot.last_note = f"no side at or below {max(BOT40_MAKER_LEVELS):.2f}"
+                else:
+                    bot.last_note = f"no side at or below {BOT40_FALLBACK_PRICE:.2f}"
             else:
-                direction_side = "UP" if distance > 0 else "DOWN"
-                side_state = up if direction_side == "UP" else down
-                if not side_state.has_fresh_ask_for_market(loaded_at):
-                    bot120_note = f"WAIT {direction_side} ask not fresh-for-market"
-                elif side_state.ask > BOT120_MAX_PRICE:
-                    bot120_note = f"WAIT {direction_side} ask={side_state.ask:.4f} > cap {BOT120_MAX_PRICE:.2f}"
-                else:
-                    bot120_note = f"BUY {direction_side} @<={side_state.ask:.4f} (dist={distance:.1f}, cap {BOT120_MAX_PRICE:.2f})"
-                    return (Decision(bot="BOT120", side=direction_side,
-                                      price_limit=side_state.ask,
-                                      size_usd=DOLLARS_PER_TRADE,
-                                      reason=f"dist={distance:.1f} cap{BOT120_MAX_PRICE:.2f}"),
-                            bot40_note or "BOT40 done/out_of_phase", bot120_note)
-
-        return (None, bot40_note, bot120_note)
-
-
-# =============================================================================
-# MAIN BOT
-# =============================================================================
-class LiveBot:
-    def __init__(self, dry_run: bool, initial_url: Optional[str]):
-        self.dry_run = dry_run
-        self.initial_url = initial_url
-        script_dir = Path(__file__).resolve().parent
-        self.data_dir = script_dir / DATA_DIR_NAME
-        self.logger = LiveLogger(self.data_dir)
-        self.wallet = Wallet(dry_run=dry_run, logger=self.logger)
-        self.binance = BinanceEngine(self.logger)
-        self.market_mgr = MarketManager(self.logger)
-        self.book = OrderBookFeed(self.market_mgr, self.logger)
-        self.safety = Safety(MAX_DAILY_LOSS_USD, MAX_WALLET_EXPOSURE_USD, dry_run, self.logger)
-        self.bot40 = BotState(name="BOT40", start_sec=BOT40_MIN_SEC, end_sec=BOT40_MAX_SEC)
-        self.bot120 = BotState(name="BOT120", start_sec=BOT120_MIN_SEC, end_sec=BOT120_MAX_SEC)
-        self.open_orders: List[FilledOrder] = []
-        self.market_history: Dict[int, Dict] = {}   # market_epoch -> {orders: [...], settlement: ...}
-        self.last_market_epoch: Optional[int] = None
-        self._stop = False
-
-    # --- helpers ---
-    def distance(self) -> Optional[float]:
-        if self.market_mgr.market is None or self.market_mgr.market.target_price is None:
-            return None
-        if self.binance.price is None:
-            return None
-        return float(self.binance.price) - float(self.market_mgr.market.target_price)
-
-    # --- main per-second loop ---
-    async def decision_loop(self) -> None:
-        last_sec = -1
-        while not self._stop:
-            try:
-                m = self.market_mgr.market
-                sec = self.market_mgr.sec_from_start()
-                # detect new market
-                if m is not None and m.market_epoch != self.last_market_epoch:
-                    if self.last_market_epoch is not None:
-                        self.logger.event("MARKET_BOUNDARY", f"old={self.last_market_epoch} new={m.market_epoch}")
-                    self.bot40.reset_market()
-                    self.bot120.reset_market()
-                    self.last_market_epoch = m.market_epoch
-
-                if m is None or sec is None:
-                    await asyncio.sleep(0.2)
-                    continue
-                if sec == last_sec:
-                    await asyncio.sleep(0.2)
-                    continue
-                last_sec = sec
-
-                btc = self.binance.price if self.binance.is_fresh() else None
-                target = m.target_price
-                dist = self.distance()
-                phase = "BOT40" if 0 <= sec <= BOT40_MAX_SEC else (
-                        "BOT120" if BOT120_MIN_SEC <= sec <= BOT120_MAX_SEC else "WAIT")
-                flow_side = Strategy.flow_side_from_distance(dist)
-
-                decision, b40_note, b120_note = Strategy.evaluate(
-                    sec=sec, market=m, btc=btc, distance=dist,
-                    book=self.book, bot40=self.bot40, bot120=self.bot120,
-                )
-
-                # log decisions every second
-                self.logger.decision(
-                    slug=m.slug, sec=sec, phase=phase,
-                    bot40_decision=("BUY" if (decision and decision.bot == "BOT40") else self.bot40.last_decision),
-                    bot40_note=b40_note or self.bot40.last_note,
-                    bot120_decision=("BUY" if (decision and decision.bot == "BOT120") else self.bot120.last_decision),
-                    bot120_note=b120_note or self.bot120.last_note,
-                    btc=btc, target=target, distance=dist, flow_side=flow_side,
-                    up_bid=self.book.up.bid, up_ask=self.book.up.ask,
-                    down_bid=self.book.down.bid, down_ask=self.book.down.ask,
-                )
-
-                if decision is not None:
-                    await self.try_execute(decision, sec, m, btc, target, dist, flow_side)
-
-                # update bot state notes for screen
-                if b40_note:
-                    self.bot40.last_note = b40_note
-                if b120_note:
-                    self.bot120.last_note = b120_note
-
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                self.logger.error("decision_loop", f"{type(e).__name__}: {e}")
-                await asyncio.sleep(1)
-
-    async def try_execute(self, decision: Decision, sec: int, market: MarketInfo,
-                          btc: Optional[float], target: Optional[float],
-                          distance: Optional[float], flow_side: Optional[str]) -> None:
-        bot_state = self.bot40 if decision.bot == "BOT40" else self.bot120
-        if bot_state.bought_in_market:
+                bot.last_note = "no side with direction / ask missing"
             return
-        # safety check
-        wallet_bal = self.wallet.get_usdc_balance() if not self.dry_run else None
-        ok, why = self.safety.check_can_trade(wallet_bal)
-        if not ok:
-            bot_state.last_decision = "BLOCKED"
-            bot_state.last_note = f"safety: {why}"
-            self.logger.event("SAFETY_BLOCK", f"bot={decision.bot} why={why}")
+
+        if bot.current_market_spent >= MAX_BUY_USD - 1e-9:
+            bot.buy_done_for_market = True
+            bot.last_decision = "WAIT"
+            bot.last_note = "cap filled"
             return
-        # token_id for the chosen side
-        token_id = market.up_token if decision.side == "UP" else market.down_token
-        if not token_id:
-            bot_state.last_note = "missing token_id"
+
+        key = (sec, side)
+        if key in bot.executed_virtual_sec_side:
+            bot.last_decision = "WAIT"
+            bot.last_note = "already checked this second"
             return
-        # convert size_usd into shares at limit price (so ~$5 spent if filled)
-        price = max(0.01, min(decision.price_limit, 0.99))
-        shares = round(decision.size_usd / price, 4)
-        if shares <= 0:
-            bot_state.last_note = "computed shares <= 0"
+        bot.executed_virtual_sec_side.add(key)
+
+        best_ask = self.prices[side]["best_ask"]
+        mode = "MARKET_035"
+        price_limit = ENTRY_THRESHOLD
+        if bot is self.bot40:
+            level, mode = self._bot40_level_and_mode(sec)
+            price_limit = level
+            if best_ask is None or best_ask > price_limit:
+                bot.last_decision = "WAIT"
+                bot.last_note = f"{side} ask not valid"
+                return
+        else:
+            mode = "MARKET_ANY"
+            price_limit = 1.0
+            if best_ask is None:
+                bot.last_decision = "WAIT"
+                bot.last_note = f"{side} ask missing"
+                return
+
+        if bot.last_buy and bot.last_buy.get("side") != side:
+            bot.last_decision = "WAIT"
+            bot.last_note = "side locked"
             return
-        # PLACE ORDER
-        order_id, status = self.wallet.place_buy(token_id=str(token_id), price=price, size_shares=shares)
-        with_flow = int(flow_side is not None and flow_side == decision.side)
-        fo = FilledOrder(
-            order_id=order_id or "-",
-            bot=decision.bot,
-            side=decision.side,
-            market_slug=market.slug,
-            market_epoch=market.market_epoch,
-            sec_from_start=sec,
-            price=price,
-            size_shares=shares,
-            spent_usd=decision.size_usd,
-            btc_price_at_entry=btc,
-            target_price_at_entry=target,
-            distance_at_entry=distance,
-            flow_side_at_entry=flow_side,
-            with_flow=with_flow,
-            placed_ts=now_local_str(),
-            filled=(self.dry_run or status == "placed"),  # in dry-run we treat as filled
-            fill_ts=now_local_str() if (self.dry_run or status == "placed") else "",
-            dry_run=self.dry_run,
+
+        avail_qty, avail_notional = self._qty_notional_le(side, price_limit)
+        remaining_cap = max(0.0, MAX_BUY_USD - bot.current_market_spent)
+        spend_cap = min(remaining_cap, avail_notional or 0.0)
+        if spend_cap <= 0:
+            bot.last_decision = "WAIT"
+            bot.last_note = f"{side} no liquidity <= {price_limit:.2f}"
+            return
+        spent, filled_qty, avg_fill = self._simulate_fill_up_to_cap(side, spend_cap, price_limit)
+        if spent <= 0 or filled_qty <= 0 or avg_fill is None:
+            bot.last_decision = "WAIT"
+            bot.last_note = "fill simulation failed"
+            return
+
+        entry_flow_side = self._flow_side_from_distance(distance)
+        entry_with_flow = int(side == entry_flow_side) if entry_flow_side is not None else None
+        pos = VirtualPosition(
+            sec=sec,
+            side=side,
+            spent=spent,
+            qty=filled_qty,
+            avg_fill=avg_fill,
+            entry_best_ask=best_ask,
+            entry_best_bid=self.prices[side]["best_bid"],
+            entry_btc_price=btc,
+            entry_target_price=target,
+            entry_distance=distance,
+            entry_flow_side=entry_flow_side,
+            entry_with_flow=entry_with_flow,
+            entry_ts=DualResearchLogger._ts(),
         )
-        self.open_orders.append(fo)
-        # mark bot as bought even if order not yet confirmed — prevents duplicate firing same second
-        bot_state.bought_in_market = True
-        bot_state.spent_this_market += decision.size_usd
-        bot_state.last_decision = "BUY"
-        bot_state.last_note = f"{decision.side} @{price:.4f} size=${decision.size_usd:.2f} status={status}"
-        self.logger.trade(fo, fill_status=status, fill_price=price if (self.dry_run or status == "placed") else None)
-        self.logger.event("ORDER_PLACED",
-                          f"bot={decision.bot} side={decision.side} price={price:.4f} "
-                          f"size=${decision.size_usd:.2f} status={status} dry_run={self.dry_run}")
-        if self.dry_run:
-            print(f"{CYAN}[DRY-RUN] {decision.bot} buy {decision.side} @{price:.4f} "
-                  f"size=${decision.size_usd:.2f} ({decision.reason}){RESET}")
-        else:
-            print(f"{GREEN if status == 'placed' else RED}[LIVE] {decision.bot} buy {decision.side} "
-                  f"@{price:.4f} size=${decision.size_usd:.2f} status={status}{RESET}")
+        bot.positions[side].append(pos)
+        bot.current_market_buy_count += 1
+        bot.current_market_spent += spent
+        bot.last_buy = {
+            "sec": sec,
+            "side": side,
+            "spent": spent,
+            "qty": filled_qty,
+            "avg_fill": avg_fill,
+            "avail_notional": avail_notional,
+        }
+        bot.virtual_buy_count += 1
+        bot.virtual_spent_total += spent
+        bot.buy_done_for_market = bot.current_market_spent >= MAX_BUY_USD - 1e-9
+        bot.triggers_seen += 1
+        bot.last_decision = f"BUY_{side}"
+        bot.last_note = f"{mode} {side} sec={sec} spent=${spent:.2f} total=${bot.current_market_spent:.2f}"
 
-    # --- settlement loop: when a market finishes, decide W/L based on Binance close ---
-    async def settlement_loop(self) -> None:
-        last_settled_epoch = -1
-        while not self._stop:
+        limit_031_filled = 1 if (bot is self.bot40 and mode == "LIMIT_031") else 0
+        limit_fill_sec = sec if limit_031_filled else None
+        fallback_used = 1 if (bot is self.bot40 and mode == "FALLBACK_035") else 0
+        fallback_fill_sec = sec if fallback_used else None
+        fallback_fill_price = avg_fill if fallback_used else None
+
+        self.logger.log_virtual_buy(
+            bot=bot,
+            slug=self.current["slug"],
+            sec=sec,
+            side=side,
+            mode=mode,
+            price_limit=price_limit,
+            spent=spent,
+            qty=filled_qty,
+            avg_fill=avg_fill,
+            best_ask=best_ask,
+            best_bid_now=self.prices[side]["best_bid"],
+            avail_notional=avail_notional,
+            avail_qty=avail_qty,
+            btc_price=btc,
+            target_price=target,
+            distance=distance,
+            limit_031_filled=limit_031_filled,
+            limit_fill_sec=limit_fill_sec,
+            fallback_used=fallback_used,
+            fallback_fill_sec=fallback_fill_sec,
+            fallback_fill_price=fallback_fill_price,
+            note=bot.last_note,
+        )
+
+    def _position_mark(self, bot: BotState, side: str) -> Tuple[float, float, Optional[float], Optional[float]]:
+        positions = bot.positions[side]
+        if not positions:
+            return 0.0, 0.0, None, None
+        total_spent = sum(p.spent for p in positions)
+        total_qty = sum(p.qty for p in positions)
+        best_bid = self.prices[side]["best_bid"]
+        if best_bid is None:
+            return total_spent, total_qty, None, None
+        mark_value = total_qty * best_bid
+        pnl = mark_value - total_spent
+        return total_spent, total_qty, round(mark_value, 6), round(pnl, 6)
+
+    def _open_pnl_total(self, bot: BotState) -> Tuple[float, float, float]:
+        total_spent = 0.0
+        total_mark = 0.0
+        for side in ["UP", "DOWN"]:
+            spent, _qty, mark_value, _pnl = self._position_mark(bot, side)
+            total_spent += spent
+            total_mark += mark_value or 0.0
+        return round(total_spent, 6), round(total_mark, 6), round(total_mark - total_spent, 6)
+
+    def _settle_bot_positions(self, bot: BotState) -> None:
+        target = self.current.get("target_price")
+        if target is None:
+            target, source, event_meta_target, line_target, strike_target, question_target, rendered_page_target = self.ensure_target_price(
+                self.current.get("slug") or "-",
+                self.current.get("url") or "",
+                self.current.get("question") or "",
+                target,
+            )
+            if target is not None:
+                self.current["target_price"] = target
+                self.current["target_source"] = source
+                self.current["target_event_meta"] = event_meta_target
+                self.current["target_line"] = line_target
+                self.current["target_strike"] = strike_target
+                self.current["target_question"] = question_target
+                self.current["target_rendered_page"] = rendered_page_target
+            else:
+                self._capture_binance_prev_5m_close_target()
+                target = self.current.get("target_binance_prev_5m_close")
+        btc = self.binance.price
+        slug = self.current.get("slug") or "-"
+        total_spent = 0.0
+        total_qty_up = 0.0
+        total_qty_down = 0.0
+        for pos in bot.positions["UP"]:
+            total_spent += pos.spent
+            total_qty_up += pos.qty
+        for pos in bot.positions["DOWN"]:
+            total_spent += pos.spent
+            total_qty_down += pos.qty
+        if total_spent <= 0:
+            return
+        if target is None or btc is None:
+            bot.last_note = f"SETTLE SKIPPED {bot.name} | missing target or binance"
+            return
+        if btc > target:
+            winner_side = "UP"
+            payout = total_qty_up
+        elif btc < target:
+            winner_side = "DOWN"
+            payout = total_qty_down
+        else:
+            winner_side = "PUSH"
+            payout = total_spent
+        pnl = payout - total_spent
+        bot.realized_payout_total += payout
+        bot.realized_pnl_total += pnl
+        bot.settled_markets += 1
+        if pnl > 1e-9:
+            bot.wins += 1
+            result = "WIN"
+        elif pnl < -1e-9:
+            bot.losses += 1
+            result = "LOSS"
+        else:
+            bot.pushes += 1
+            result = "PUSH"
+        self.logger.log_settlement(
+            bot=bot,
+            slug=slug,
+            winner_side=winner_side,
+            btc_price=btc,
+            target_price=target,
+            spent_total=total_spent,
+            payout_total=payout,
+            pnl_total=pnl,
+            up_qty=total_qty_up,
+            down_qty=total_qty_down,
+            result=result,
+        )
+        for side_name in ["UP", "DOWN"]:
+            for pos in bot.positions[side_name]:
+                if winner_side == "PUSH":
+                    pos_payout = pos.spent
+                elif pos.side == winner_side:
+                    pos_payout = pos.qty
+                else:
+                    pos_payout = 0.0
+                pos_pnl = pos_payout - pos.spent
+                if pos_pnl > 1e-9:
+                    pos_result = "WIN"
+                elif pos_pnl < -1e-9:
+                    pos_result = "LOSS"
+                else:
+                    pos_result = "PUSH"
+                self.logger.log_trade_outcome(
+                    bot_name=bot.name,
+                    slug=slug,
+                    pos=pos,
+                    winner_side=winner_side,
+                    result=pos_result,
+                    payout=pos_payout,
+                    pnl=pos_pnl,
+                    settle_btc_price=btc,
+                    settle_target_price=target,
+                )
+        bot.last_note = f"SETTLED {bot.name} winner={winner_side} spent=${total_spent:.2f} payout=${payout:.2f} pnl=${pnl:.2f}"
+
+    async def move_to_next_market(self) -> None:
+        old_slug = self.current["slug"]
+        old_suffix = self.current["current_suffix"]
+        self._settle_bot_positions(self.bot40)
+        self._settle_bot_positions(self.bot120)
+        self.current["current_suffix"] = int(self.current["current_suffix"]) + 300
+        self.current["slug"] = self.build_slug_from_suffix(self.current["prefix"], self.current["current_suffix"])
+        self.current["url"] = self.build_url_from_slug(self.current["slug"])
+        market = self.fetch_market_by_slug(self.current["slug"])
+        if not market:
+            raise RuntimeError(f"לא נמצא שוק עבור slug הבא: {self.current['slug']}")
+        self.current.update(market)
+        self.current["market_loaded_at"] = time.time()
+        self._render_task = None
+        self._capture_binance_prev_5m_close_target()
+        self._capture_binance_open_target()
+        self._kickoff_render_target()
+        for side in ["UP", "DOWN"]:
+            self.prices[side] = {"best_bid": None, "best_ask": None, "last_trade": None, "updated_at": 0.0, "asks": []}
+        self.bot40.reset_market()
+        self.bot120.reset_market()
+        self.meta["markets_scanned"] += 1
+        self.meta["last_rollover"] = f"{old_suffix} -> {self.current['current_suffix']}"
+        self.logger.log_event(old_slug or "-", "ROLLOVER", f"to {self.current['slug']}")
+
+    def _format_bot_panel(self, bot: BotState) -> List[str]:
+        open_spent, open_mark, open_pnl = self._open_pnl_total(bot)
+        market_profit = open_pnl
+        active_buy = str(bot.last_decision).startswith("BUY")
+        decision_text = colorize_decision(bot.last_decision, active=active_buy)
+        blink_profit = abs(open_pnl) > 1e-9
+        role_line = bot.last_buy["side"] if bot.last_buy else "NONE"
+        return [
+            f"DEC:{decision_text}  TRIG:{bot.triggers_seen}  MKTS:{self.meta['markets_scanned']}",
+            f"BUYS:{bot.virtual_buy_count}  SETTLED:{bot.settled_markets}",
+            f"THIS:buys={bot.current_market_buy_count} spent=${bot.current_market_spent:,.2f}",
+            f"OPEN:$ / PNL:{color_money(open_mark, False)} / {color_money(open_pnl, blink_profit)}",
+            f"PROFIT:{color_money(market_profit)}",
+            f"W:{bot.wins}  L:{bot.losses}  P:{bot.pushes}",
+            f"POS:{role_line}  LAST:{bot.last_note}",
+            f"WIN:{'ACTIVE' if bot.start_sec <= self.seconds_from_market_start() <= bot.end_sec else 'CLOSED'}  REASON:{bot.last_note}",
+        ]
+
+    def print_status(self) -> None:
+        self.clear_screen()
+        width = 118
+        btc = self.binance.snapshot()
+        updated = datetime.fromtimestamp(btc['updated_at']).strftime('%Y-%m-%d %H:%M:%S') if btc['updated_at'] else '-'
+        btc_price = btc['price']
+
+        target_used, target_source = self._resolve_target_in_use()
+        self.current["target_price"] = target_used
+        self.current["target_source"] = target_source
+        dist = None if btc_price is None or target_used is None else abs(btc_price - target_used)
+
+        print(f"{ANSI_BOLD}BTC_5M_DUAL_RESEARCH_RENDER_RETRY_V1{ANSI_RESET}")
+        print("=" * width)
+        print(f"LOCAL TIME   : {self.now_local_str()}")
+        print(f"SLUG         : {self.current['slug'] or '-'}")
+        print(f"URL          : {self.current['url'] or '-'}")
+        print(f"QUESTION     : {self.current['question'] or '-'}")
+        print(f"MARKET END   : {self.current['end_date'] or '-'}")
+        print(f"SEC FROM STRT: {self.seconds_from_market_start()}")
+        print(f"ENTRY RULE   : bot40 0-{BOT40_LIMIT_END_SEC}s maker@{BOT40_MAKER_LEVELS} (size=${BOT40_MAKER_SIZE_USD:.0f}/lvl) then {BOT40_MAX_SEC}s<={BOT40_FALLBACK_PRICE:.2f} | if dist>={BOT40_FLOW_DIST_THRESHOLD:.0f} only with flow | bot120 {BOT120_MIN_SEC}-{BOT120_MAX_SEC}s dir-only dist>={MIN_DIST_BOT120:.0f} cap<={BOT120_MAX_PRICE:.2f} | cap=${MAX_BUY_USD:.0f}")
+        print(f"BINANCE BTC  : {self.fmt(btc_price, 2)} | updated: {updated}")
+        print(f"TARGET USED  : {self.fmt(target_used, 2)} | source: {target_source or '-'}")
+        print(f"TGT RENDERED : {self.fmt(self.current.get('target_rendered_page'), 2)}")
+        print(f"TGT MODE     : rendered retry 0-{RENDER_RETRY_WINDOW_SEC}s every {RENDER_RETRY_INTERVAL_SEC}s | no fallback for trading")
+        print(f"TGT RETRIES  : attempts={self.current.get('render_retry_attempts') or 0} | last_sec={self.current.get('render_retry_last_sec') if self.current.get('render_retry_last_sec') is not None else '-'} | status={self.current.get('render_retry_status') or '-'}")
+        print(f"TGT SOURCE   : {self.current.get('render_retry_last_source') or '-'}")
+        print(f"TGT ERR      : {self.current.get('render_retry_last_error') or '-'}")
+        print(f"TGT BIN CLOS : {self.fmt(self.current.get('target_binance_prev_5m_close'), 2)}")
+        print(f"TGT BIN OPEN : {self.fmt(self.current.get('target_binance_open'), 2)}")
+        print(f"DIST TARGET  : {self.fmt(dist, 2)} | BOT120 MIN DIST: {MIN_DIST_BOT120:.2f}")
+        print("-" * width)
+        print(f"{'SIDE':<8}{'BEST BID':<12}{'BEST ASK':<12}{'LAST TRADE':<12}{'SPREAD':<10}{'STALE':<8}{'QTY<=' + str(ENTRY_THRESHOLD):<18}{'USD<=' + str(ENTRY_THRESHOLD):<18}")
+        for side in ("UP", "DOWN"):
+            best_bid = self.prices[side]["best_bid"]
+            best_ask = self.prices[side]["best_ask"]
+            spread = None
+            if best_bid is not None and best_ask is not None:
+                spread = best_ask - best_bid
+            stale = "YES" if ((time.time() - self.prices[side]["updated_at"]) > STALE_AFTER_SEC if self.prices[side]["updated_at"] else True) else "NO"
+            print(
+                f"{side:<8}"
+                f"{self.fmt(best_bid):<12}"
+                f"{self.fmt(best_ask):<12}"
+                f"{self.fmt(self.prices[side]['last_trade']):<12}"
+                f"{self.fmt(spread):<10}"
+                f"{stale:<8}"
+                f"{self.fmt(self._qty_notional_le(side, ENTRY_THRESHOLD)[0]):<18}"
+                f"{self.fmt(self._qty_notional_le(side, ENTRY_THRESHOLD)[1]):<18}"
+            )
+        print("=" * width)
+
+        left = self._format_bot_panel(self.bot40)
+        right = self._format_bot_panel(self.bot120)
+        panel_width = 56
+        print(ANSI_CYAN + trim_cell("BOT40", panel_width) + ANSI_RESET + " | " + ANSI_CYAN + trim_cell("BOT120", panel_width) + ANSI_RESET)
+        print("-" * (panel_width * 2 + 3))
+        for l, r in zip(left, right):
+            print(trim_cell(l, panel_width) + " | " + trim_cell(r, panel_width))
+        print("-" * (panel_width * 2 + 3))
+        combined_trades = self.bot40.virtual_buy_count + self.bot120.virtual_buy_count
+        bot40_open_spent, bot40_open_mark, bot40_open_pnl = self._open_pnl_total(self.bot40)
+        bot120_open_spent, bot120_open_mark, bot120_open_pnl = self._open_pnl_total(self.bot120)
+        bot40_total_profit = self.bot40.realized_pnl_total + bot40_open_pnl
+        bot120_total_profit = self.bot120.realized_pnl_total + bot120_open_pnl
+        combined_profit = bot40_total_profit + bot120_total_profit
+        print(f"BOT40 TOTAL_PROFIT : {color_money(bot40_total_profit)}")
+        print(f"BOT120 TOTAL_PROFIT: {color_money(bot120_total_profit)}")
+        print(f"COMBINED: TRADES={combined_trades}   TOTAL_PROFIT={color_money(combined_profit)}")
+        print("Ctrl+C כדי לעצור")
+
+    async def stream_current_market(self) -> None:
+        ssl_ctx = ssl.create_default_context()
+        while True:
             try:
-                m = self.market_mgr.market
-                sec = self.market_mgr.sec_from_start()
-                if m is None or sec is None:
-                    await asyncio.sleep(1)
-                    continue
-                # settlement happens at second 300 (end of 5-min window)
-                if sec >= 300 and m.market_epoch != last_settled_epoch:
-                    last_settled_epoch = m.market_epoch
-                    btc_now = self.binance.price
-                    target = m.target_price
-                    if btc_now is not None and target is not None:
-                        winner = "UP" if btc_now >= target else "DOWN"
-                        # close out positions for THIS market
-                        for fo in list(self.open_orders):
-                            if fo.market_epoch != m.market_epoch or fo.settled:
-                                continue
-                            if not fo.filled:
-                                # never filled — write off
-                                fo.settled = True
-                                fo.settle_ts = now_local_str()
-                                fo.winner_side = winner
-                                fo.payout_usd = 0.0
-                                fo.pnl_usd = 0.0  # didn't fill, no spend
-                                self.logger.event("UNFILLED_EXPIRED",
-                                                  f"order_id={fo.order_id} side={fo.side}")
-                                continue
-                            won = (fo.side == winner)
-                            payout = fo.size_shares * 1.0 if won else 0.0
-                            pnl = payout - fo.spent_usd
-                            fo.settled = True
-                            fo.settle_ts = now_local_str()
-                            fo.winner_side = winner
-                            fo.payout_usd = payout
-                            fo.pnl_usd = pnl
-                            self.safety.record_settlement(fo.spent_usd, payout)
-                            self.logger.trade(fo, fill_status="settled", fill_price=fo.price)
-                            self.logger.event("SETTLED",
-                                              f"bot={fo.bot} side={fo.side} winner={winner} "
-                                              f"pnl={pnl:+.2f} dry_run={fo.dry_run}")
-                await asyncio.sleep(1)
+                async with websockets.connect(
+                    POLY_WS_URL,
+                    ssl=ssl_ctx,
+                    ping_interval=None,
+                    close_timeout=5,
+                    max_size=2**20,
+                ) as ws:
+                    await ws.send(json.dumps(self.build_subscribe_payload()))
+                    hb_task = asyncio.create_task(self.ws_heartbeat(ws))
+                    self.logger.log_event(self.current["slug"], "WS_SUBSCRIBE", self.current["slug"])
+                    last_print = 0.0
+                    last_logged_sec = -1
+                    try:
+                        while True:
+                            if time.time() >= int(self.current["current_suffix"]) + 300:
+                                await self.move_to_next_market()
+                                self.print_status()
+                                break
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                                self.handle_ws_message(raw)
+                            except asyncio.TimeoutError:
+                                pass
+                            self._capture_binance_prev_5m_close_target()
+                            self._capture_binance_open_target()
+                            sec = self.seconds_from_market_start()
+                            if sec != last_logged_sec:
+                                last_logged_sec = sec
+                                await self._maybe_retry_rendered_target(sec)
+                                self._record_bot40_research_for_second(sec)
+                                self._record_bot120_research_for_second(sec)
+                                self._record_signals_for_second(sec)
+                                bot40_side = self._choose_bot40_side(sec)
+                                if bot40_side is not None:
+                                    self._try_execute_bot_buy(self.bot40, sec, bot40_side)
+                                else:
+                                    self._try_execute_bot_buy(self.bot40, sec, None)
+                                bot120_side = self._choose_bot120_side(sec)
+                                if bot120_side is not None:
+                                    self._try_execute_bot_buy(self.bot120, sec, bot120_side)
+                                else:
+                                    self._try_execute_bot_buy(self.bot120, sec, None)
+                            if time.time() - last_print >= SCREEN_REFRESH_EVERY_SEC:
+                                last_print = time.time()
+                                self.print_status()
+                    finally:
+                        hb_task.cancel()
+            except KeyboardInterrupt:
+                raise
             except Exception as e:
-                self.logger.error("settlement_loop", f"{type(e).__name__}: {e}")
-                await asyncio.sleep(2)
-
-    # --- screen ---
-    async def screen_loop(self) -> None:
-        while not self._stop:
-            try:
-                clear_screen()
-                m = self.market_mgr.market
-                sec = self.market_mgr.sec_from_start()
-                btc = self.binance.price
-                target = m.target_price if m else None
-                dist = self.distance()
-                flow = Strategy.flow_side_from_distance(dist)
-
-                mode = f"{RED}LIVE TRADING{RESET}" if not self.dry_run else f"{CYAN}DRY-RUN{RESET}"
-                print(f"{BOLD}LIVE_BTC_5M_V1{RESET}   mode={mode}   {now_local_str()}")
-                print("-" * 100)
-                if m:
-                    print(f"SLUG       : {m.slug}")
-                    print(f"URL        : {m.url}")
-                    print(f"SEC FROM 0 : {sec}   ROLLOVER: {self.market_mgr.last_rollover}")
-                    print(f"TARGET     : {fmt(target, 2)}   status={self.market_mgr.target_status}   attempts={self.market_mgr.target_attempts}")
-                else:
-                    print("MARKET     : loading...")
-                print(f"BINANCE    : {fmt(btc, 2)}   age={fmt(self.binance.age(), 2)}s   status={self.binance.status}   ticks={self.binance.ticks_total}")
-                print(f"DISTANCE   : {fmt(dist, 2)}   flow={flow or '-'}")
-                print(f"POLY WS    : status={self.book.status}   updates={self.book.updates_total}   reconnects={self.book.reconnects}")
-                print("-" * 100)
-                up = self.book.up
-                down = self.book.down
-                print(f"{'SIDE':<8}{'BID':<10}{'ASK':<10}{'LAST':<10}{'AGE':<8}{'UPDATES':<10}")
-                print(f"{'UP':<8}{fmt(up.bid, 4):<10}{fmt(up.ask, 4):<10}{fmt(up.last, 4):<10}{fmt(time.time() - up.updated_at if up.updated_at else None, 1):<8}{up.updates:<10}")
-                print(f"{'DOWN':<8}{fmt(down.bid, 4):<10}{fmt(down.ask, 4):<10}{fmt(down.last, 4):<10}{fmt(time.time() - down.updated_at if down.updated_at else None, 1):<8}{down.updates:<10}")
-                print("-" * 100)
-                print(f"BOT40  : {self.bot40.last_decision:<10}{self.bot40.last_note}")
-                print(f"BOT120 : {self.bot120.last_decision:<10}{self.bot120.last_note}")
-                print("-" * 100)
-                print(f"DAILY ({self.safety.day})   trades={self.safety.daily_trades}   "
-                      f"W={self.safety.daily_wins} L={self.safety.daily_losses}   "
-                      f"PnL={color_money(self.safety.daily_pnl)}   "
-                      f"limit_loss=${self.safety.max_daily_loss:.0f}")
-                if self.safety.killed:
-                    print(f"{RED}{BOLD}KILL SWITCH ACTIVE — {self.safety.kill_reason}{RESET}")
-                if not self.dry_run:
-                    bal = self.wallet.get_usdc_balance()
-                    print(f"WALLET     : {fmt(bal, 2)} USDC   address={self.wallet.address}   cap=${self.safety.max_wallet:.0f}")
-                else:
-                    print(f"{DIM}WALLET     : (dry-run — wallet not queried){RESET}")
-                print(f"OPEN/SETTLED orders this session: {len(self.open_orders)}")
-                await asyncio.sleep(SCREEN_REFRESH_EVERY_SEC)
-            except Exception:
-                await asyncio.sleep(1)
-
-    # --- orchestrate ---
-    async def run(self) -> None:
-        # 0. load env
-        env_paths = [
-            Path(__file__).resolve().parent / ".env",
-            Path(__file__).resolve().parent.parent.parent / ".env",   # polymarket-bot/.env (if any)
-        ]
-        self.wallet.load_env(env_paths)
-
-        # 1. connect to CLOB if needed
-        if not self.dry_run:
-            ok = self.wallet.connect()
-            if not ok:
-                print(f"{RED}Cannot start in live mode — CLOB connect failed.{RESET}")
-                return
-            bal = self.wallet.get_usdc_balance()
-            print(f"USDC balance at startup: {fmt(bal, 2)}")
-            if bal is not None and bal > MAX_WALLET_EXPOSURE_USD:
-                print(f"{RED}Wallet has ${bal:.2f}, more than cap ${MAX_WALLET_EXPOSURE_USD}.{RESET}")
-                print(f"{RED}Refusing to trade. Withdraw funds or raise the cap.{RESET}")
-                return
-
-        # 2. initial URL
-        if self.initial_url:
-            url = self.initial_url
-        else:
-            print("הדבק כתובת שוק 5 דקות של פולימרקט (paste a Polymarket 5-min event URL):")
-            url = input("> ").strip()
-        try:
-            slug = extract_slug(url)
-        except ValueError as e:
-            print(f"{RED}{e}{RESET}")
-            return
-
-        # 3. signal handlers
-        loop = asyncio.get_running_loop()
-        for sig_name in ("SIGINT", "SIGTERM"):
-            try:
-                sig = getattr(signal, sig_name)
-                loop.add_signal_handler(sig, lambda: setattr(self, "_stop", True))
-            except Exception:
-                pass
-
-        self.logger.event("START", f"dry_run={self.dry_run} initial_slug={slug}")
-
-        # 4. spawn loops
-        tasks = [
-            asyncio.create_task(self.binance.run(), name="binance"),
-            asyncio.create_task(self.market_mgr.rollover_loop(slug), name="market_rollover"),
-            asyncio.create_task(self.book.run(), name="poly_book"),
-            asyncio.create_task(self.decision_loop(), name="decisions"),
-            asyncio.create_task(self.settlement_loop(), name="settlements"),
-            asyncio.create_task(self.screen_loop(), name="screen"),
-        ]
-        try:
-            while not self._stop and not self.market_mgr._stop:
-                await asyncio.sleep(0.5)
-        finally:
-            self._stop = True
-            self.market_mgr.stop()
-            self.book.stop()
-            self.binance.stop()
-            self.logger.event("STOP", "")
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+                self.bot40.last_decision = "ERROR"
+                self.bot120.last_decision = "ERROR"
+                self.bot40.last_note = f"[WS ERROR] {e}"
+                self.bot120.last_note = f"[WS ERROR] {e}"
+                self.logger.log_event(self.current.get("slug") or "-", "ERROR", str(e))
+                self.print_status()
+                await asyncio.sleep(3)
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-def parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Live Polymarket BTC 5-min trading bot.")
-    p.add_argument("--live", action="store_true",
-                   help="Enable real trading (default is dry-run)")
-    p.add_argument("--url", help="Initial Polymarket 5-min event URL (optional, will prompt if not given)")
-    return p.parse_args(argv)
-
-
-def confirm_live() -> bool:
-    print(f"\n{RED}{BOLD}=========================================={RESET}")
-    print(f"{RED}{BOLD}  LIVE TRADING MODE — REAL MONEY ON PLOY  {RESET}")
-    print(f"{RED}{BOLD}=========================================={RESET}")
-    print(f"{YELLOW}This bot will place real BUY orders on Polymarket using the wallet")
-    print(f"private key in .env. Per-trade size: ${DOLLARS_PER_TRADE:.2f}.{RESET}")
-    print(f"Daily loss cap: ${MAX_DAILY_LOSS_USD:.2f}. Wallet cap: ${MAX_WALLET_EXPOSURE_USD:.2f}.")
-    print()
-    answer = input("Type the words 'go live' to confirm: ").strip().lower()
-    return answer == "go live"
-
-
-def main() -> None:
-    args = parse_args(sys.argv[1:])
-    dry_run = not args.live
-    if args.live:
-        if not confirm_live():
-            print("Live mode not confirmed. Exiting.")
-            return
-    bot = LiveBot(dry_run=dry_run, initial_url=args.url)
+async def main() -> None:
+    logger = DualResearchLogger()
+    logger.clear_and_init()
+    binance = BinanceEngine()
+    binance_task = asyncio.create_task(binance.run())
+    bot = Polymarket5mDualBot(binance, logger)
     try:
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("\nstopped.")
+        await bot.load_initial_market_from_user()
+        bot.print_status()
+        await bot.stream_current_market()
+    finally:
+        binance.stop()
+        binance_task.cancel()
+        try:
+            await binance_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        if sys.platform.startswith("win"):
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nנעצר.")
