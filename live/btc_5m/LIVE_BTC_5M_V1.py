@@ -65,6 +65,13 @@ try:
 except Exception:
     HAS_CLOB = False
 
+try:
+    from playwright.async_api import async_playwright
+    HAS_PLAYWRIGHT = True
+except Exception:
+    async_playwright = None
+    HAS_PLAYWRIGHT = False
+
 
 # =============================================================================
 # STRATEGY CONSTANTS  (mirror research V3)
@@ -243,6 +250,84 @@ def extract_target_from_html(url: str) -> Optional[float]:
     return None
 
 
+async def extract_target_from_rendered_page(url: str) -> Tuple[Optional[float], str]:
+    """
+    Reliable target capture by rendering the Polymarket page in headless Chromium
+    (Playwright). Polymarket renders 'Price to Beat' via JavaScript, so the raw
+    HTML scrape misses it but the rendered page exposes it.
+
+    Returns: (target_price_or_none, source_or_error_string).
+    """
+    if not HAS_PLAYWRIGHT or async_playwright is None:
+        return None, "playwright_not_installed"
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = await browser.new_page(
+                    viewport={"width": 1600, "height": 1400},
+                    user_agent=(
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(3500)
+                rendered_parts: List[str] = []
+                try:
+                    rendered_parts.append(await page.locator("body").inner_text(timeout=10000))
+                except Exception:
+                    pass
+                try:
+                    txt = await page.text_content("body")
+                    if txt:
+                        rendered_parts.append(txt)
+                except Exception:
+                    pass
+                try:
+                    rendered_parts.append(await page.content())
+                except Exception:
+                    pass
+                rendered = "\n".join(t for t in rendered_parts if t)
+                # primary: "Price to Beat" anchor + first BTC-like dollar value after it
+                for label in (r'Price\s*to\s*Beat', r'PRICE\s*TO\s*BEAT'):
+                    m = re.search(label, rendered, re.IGNORECASE)
+                    if not m:
+                        continue
+                    window = rendered[m.start(): m.start() + 1200]
+                    nums = re.findall(r'\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)', window)
+                    for n in nums:
+                        x = safe_float(n.replace(",", ""))
+                        if x is not None and 10000 <= x <= 500000:
+                            return x, "rendered_price_to_beat"
+                    nums = re.findall(r'(?<!\d)([0-9]{2,3}(?:,[0-9]{3})+(?:\.\d+)?)(?!\d)', window)
+                    for n in nums:
+                        x = safe_float(n.replace(",", ""))
+                        if x is not None and 10000 <= x <= 500000:
+                            return x, "rendered_no_dollar"
+                # secondary: regex over rendered text
+                for pat in (
+                    r'Price\s*to\s*Beat[\s\S]{0,300}?\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)',
+                    r'priceToBeat[^0-9]{0,120}([0-9]{1,3}(?:,[0-9]{3})+(?:\.\d+)?)',
+                ):
+                    m = re.search(pat, rendered, re.IGNORECASE | re.DOTALL)
+                    if m:
+                        x = safe_float(m.group(1).replace(",", ""))
+                        if x is not None and 10000 <= x <= 500000:
+                            return x, "rendered_regex"
+                return None, "rendered_target_not_found"
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return None, f"rendered_error:{type(e).__name__}:{e}"
+
+
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
@@ -256,8 +341,10 @@ class MarketInfo:
     start_iso: str = ""
     end_iso: str = ""
     target_price: Optional[float] = None
+    target_source: Optional[str] = None
     up_token: Optional[str] = None
     down_token: Optional[str] = None
+    loaded_at: float = 0.0   # wall-clock when market info was loaded (used for fresh-ask check)
 
 
 @dataclass
@@ -273,6 +360,16 @@ class OrderBookSide:
         if self.updated_at <= 0:
             return True
         return (time.time() - self.updated_at) > STALE_AFTER_SEC
+
+    def has_fresh_ask_for_market(self, market_loaded_at: float) -> bool:
+        """Strict V3-style check: ask exists AND updated AFTER the current market was loaded."""
+        if self.ask is None:
+            return False
+        if self.updated_at <= 0:
+            return False
+        if market_loaded_at <= 0:
+            return not self.stale()
+        return self.updated_at >= market_loaded_at and not self.stale()
 
 
 @dataclass
@@ -582,6 +679,44 @@ class MarketManager:
         self.target_status: str = "idle"
         self.target_attempts: int = 0
         self._stop = False
+        self._render_task: Optional[asyncio.Task] = None
+        self._render_for_epoch: Optional[int] = None  # which market epoch the in-flight render is for
+
+    def _kickoff_render(self) -> None:
+        """V3-style: spawn a background render task without blocking the main loop."""
+        if not HAS_PLAYWRIGHT:
+            return
+        if self.market is None or self.market.target_price is not None:
+            return
+        # if a task is already running for THIS market, don't spawn another
+        if (self._render_task is not None and not self._render_task.done()
+                and self._render_for_epoch == self.market.market_epoch):
+            return
+        self._render_for_epoch = self.market.market_epoch
+        self._render_task = asyncio.create_task(self._render_capture(self.market.market_epoch))
+
+    async def _render_capture(self, for_epoch: int) -> None:
+        """Background task: render the current market URL with Playwright, store target if found.
+        Slug-stale guard: only writes the result if the bot is STILL on the same market epoch."""
+        try:
+            if self.market is None:
+                return
+            url = self.market.url
+            target_val, src = await extract_target_from_rendered_page(url)
+            # stale guard: market may have rolled while we were rendering
+            if self.market is None or self.market.market_epoch != for_epoch:
+                self.logger.event("RENDER_STALE", f"epoch={for_epoch} discarded (rollover)")
+                return
+            if target_val is not None and self.market.target_price is None:
+                self.market.target_price = float(target_val)
+                self.market.target_source = src
+                self.target_status = "captured"
+                self.logger.event("TARGET_CAPTURED",
+                                  f"slug={self.market.slug} target={target_val} src={src}")
+            elif target_val is None:
+                self.target_status = f"render_failed ({src})"
+        except Exception as e:
+            self.logger.error("render_capture", f"{type(e).__name__}: {e}")
 
     def stop(self) -> None:
         self._stop = True
@@ -657,10 +792,14 @@ class MarketManager:
             print(f"{RED}Initial market not found via Gamma. Check the URL.{RESET}")
             self._stop = True
             return
+        first.loaded_at = time.time()
         self.market = first
         self.loaded_epoch = first.market_epoch
         self.logger.event("MARKET_LOADED",
                           f"slug={first.slug} target={first.target_price}")
+        # if Gamma/HTML didn't return a target, kick off background render
+        if first.target_price is None:
+            self._kickoff_render()
 
         while not self._stop:
             try:
@@ -676,29 +815,43 @@ class MarketManager:
                         if fetched is not None:
                             break
                     if fetched is not None:
+                        fetched.loaded_at = time.time()
                         self.market = fetched
                         self.loaded_epoch = fetched.market_epoch
                     else:
-                        # fallback empty market — still rollover so we don't loop
                         self.market = MarketInfo(slug=desired_slug, suffix=desired,
                                                   market_epoch=desired,
-                                                  url=event_url_from_slug(desired_slug))
+                                                  url=event_url_from_slug(desired_slug),
+                                                  loaded_at=time.time())
                         self.loaded_epoch = desired
                     self.last_rollover = f"{old} -> {self.loaded_epoch}"
+                    self.target_attempts = 0
+                    self.target_status = "captured" if (self.market and self.market.target_price) else "trying"
                     self.logger.event("MARKET_ROLLOVER",
                                       f"new_slug={self.market.slug} target={self.market.target_price}")
-                # background target retry
+                    # always kick off a render on rollover if we don't have a target yet
+                    if self.market and self.market.target_price is None:
+                        self._kickoff_render()
+                # ongoing target retry: cheap path (Gamma+HTML), then ensure render is in flight
                 if self.market and self.market.target_price is None:
                     self.target_attempts += 1
-                    self.target_status = "trying"
-                    refreshed = self.fetch_by_slug(self.market.slug)
-                    if refreshed and refreshed.target_price is not None:
-                        self.market.target_price = refreshed.target_price
-                        self.market.up_token = refreshed.up_token or self.market.up_token
-                        self.market.down_token = refreshed.down_token or self.market.down_token
-                        self.target_status = "captured"
-                        self.logger.event("TARGET_CAPTURED",
-                                          f"slug={self.market.slug} target={self.market.target_price}")
+                    if self.target_status not in ("rendering", "captured"):
+                        self.target_status = "trying"
+                    # cheap retry every cycle (~0.5s) — Gamma might come online late
+                    if self.target_attempts % 6 == 1:  # try Gamma/HTML every ~3s, not every 0.5s
+                        refreshed = self.fetch_by_slug(self.market.slug)
+                        if refreshed and refreshed.target_price is not None:
+                            self.market.target_price = refreshed.target_price
+                            self.market.up_token = refreshed.up_token or self.market.up_token
+                            self.market.down_token = refreshed.down_token or self.market.down_token
+                            self.target_status = "captured"
+                            self.logger.event("TARGET_CAPTURED",
+                                              f"slug={self.market.slug} target={self.market.target_price} src=gamma_or_html")
+                    # ensure a render task is running in the background (non-blocking)
+                    self._kickoff_render()
+                    if (self._render_task is not None and not self._render_task.done()
+                            and self._render_for_epoch == self.market.market_epoch):
+                        self.target_status = "rendering"
                 else:
                     self.target_status = "captured" if (self.market and self.market.target_price) else "missing"
                 await asyncio.sleep(0.5)
@@ -937,19 +1090,20 @@ class Strategy:
         flow_side = Strategy.flow_side_from_distance(distance)
         up = book.up
         down = book.down
+        loaded_at = market.loaded_at
 
         # --- BOT40 ---
         if BOT40_MIN_SEC <= sec <= BOT40_MAX_SEC and not bot40.bought_in_market:
             if btc is None or target is None or distance is None:
                 bot40_note = "missing btc/target/distance"
-            elif up.stale() and down.stale():
-                bot40_note = "both sides stale"
+            elif not (up.has_fresh_ask_for_market(loaded_at) or down.has_fresh_ask_for_market(loaded_at)):
+                bot40_note = "no side fresh-for-market"
             else:
                 price_cap = BOT40_LIMIT_PRICE if sec <= BOT40_LIMIT_END_SEC else BOT40_FALLBACK_PRICE
                 eligible: List[Tuple[str, float]] = []
-                if up.ask is not None and not up.stale() and up.ask <= price_cap:
+                if up.has_fresh_ask_for_market(loaded_at) and up.ask <= price_cap:
                     eligible.append(("UP", up.ask))
-                if down.ask is not None and not down.stale() and down.ask <= price_cap:
+                if down.has_fresh_ask_for_market(loaded_at) and down.ask <= price_cap:
                     eligible.append(("DOWN", down.ask))
                 note = f"price_cap<={price_cap:.2f}"
                 if abs(distance) >= BOT40_FLOW_DIST_THRESHOLD and flow_side is not None:
@@ -974,10 +1128,8 @@ class Strategy:
             else:
                 direction_side = "UP" if distance > 0 else "DOWN"
                 side_state = up if direction_side == "UP" else down
-                if side_state.stale():
-                    bot120_note = f"WAIT {direction_side} side stale"
-                elif side_state.ask is None:
-                    bot120_note = f"WAIT {direction_side} no ask"
+                if not side_state.has_fresh_ask_for_market(loaded_at):
+                    bot120_note = f"WAIT {direction_side} ask not fresh-for-market"
                 elif side_state.ask > BOT120_MAX_PRICE:
                     bot120_note = f"WAIT {direction_side} ask={side_state.ask:.4f} > cap {BOT120_MAX_PRICE:.2f}"
                 else:
