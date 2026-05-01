@@ -65,7 +65,7 @@ HTTP_TIMEOUT = 20
 SCREEN_REFRESH_SEC = 1.0
 STALE_AFTER_SEC = 10.0
 MAX_HISTORY_SEC = 7200
-RAW_POLY_SAVE = True
+RAW_POLY_SAVE = False  # CHANGED 2026-05-01 — raw .jsonl was 25GB/day per coin, would fill disk in 10h with 6 coins. Parsed data is in poly_book_ticks.csv anyway.
 
 ANSI_RESET = "\033[0m"
 ANSI_GREEN = "\033[32m"
