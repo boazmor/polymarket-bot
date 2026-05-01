@@ -274,6 +274,160 @@ class BinanceEngine:
         self._stop = True
 
 
+# ============================================================================
+# WALLET — CLOB integration for live trading
+# ============================================================================
+class Wallet:
+    """Polymarket CLOB wallet wrapper.
+    Loads .env, creates ClobClient with signature_type=2 (Gnosis Safe proxy
+    — confirmed via reference_polymarket_wallet_setup memory), derives API
+    credentials, and exposes order placement / cancellation / balance query.
+
+    In dry-run mode the wallet is inert: place_buy returns a fake order_id
+    and balance returns None — the bot's V3 simulation logic kicks in instead.
+    """
+
+    SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2  # discovered 2026-05-01 — see memory
+
+    def __init__(self, dry_run: bool, env_paths: Optional[List[str]] = None):
+        self.dry_run = dry_run
+        self.env_paths = env_paths or [
+            "/root/.env",
+            os.path.join(os.path.dirname(__file__), ".env"),
+        ]
+        self.private_key: Optional[str] = None
+        self.address: Optional[str] = None
+        self.rpc_url: Optional[str] = None
+        self.client = None  # py_clob_client.ClobClient instance once connected
+        self.connected: bool = False
+        self.last_error: str = ""
+
+    def _load_env(self) -> bool:
+        try:
+            from dotenv import load_dotenv
+        except Exception:
+            self.last_error = "python-dotenv not installed"
+            return False
+        loaded_any = False
+        for p in self.env_paths:
+            if os.path.exists(p):
+                load_dotenv(p, override=True)
+                loaded_any = True
+        if not loaded_any:
+            self.last_error = "no .env file found in known locations"
+            return False
+        self.private_key = (
+            os.environ.get("PRIVATE_KEY")
+            or os.environ.get("MY_PRIVATE_KEY")
+            or os.environ.get("WALLET_PRIVATE_KEY")
+        )
+        self.address = os.environ.get("WALLET_ADDRESS") or os.environ.get("MY_ADDRESS")
+        self.rpc_url = os.environ.get("POLYGON_RPC_URL")
+        if not self.private_key or len(self.private_key) < 60:
+            self.last_error = "private key missing or invalid in .env"
+            return False
+        return True
+
+    def connect(self) -> bool:
+        """Initialize ClobClient and derive API credentials. Only needed for
+        live mode. Returns True on success, False otherwise (last_error is set)."""
+        if self.dry_run:
+            return True  # nothing to do — dry-run uses V3 simulation
+        if not self._load_env():
+            return False
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.constants import POLYGON
+        except Exception as e:
+            self.last_error = f"py-clob-client not installed: {e}"
+            return False
+        try:
+            self.client = ClobClient(
+                host="https://clob.polymarket.com",
+                key=self.private_key,
+                chain_id=POLYGON,
+                signature_type=self.SIGNATURE_TYPE_POLY_GNOSIS_SAFE,
+            )
+            creds = self.client.create_or_derive_api_creds()
+            self.client.set_api_creds(creds)
+            self.connected = True
+            return True
+        except Exception as e:
+            self.last_error = f"CLOB connect failed: {type(e).__name__}: {e}"
+            self.connected = False
+            return False
+
+    def get_usdc_balance(self) -> Optional[float]:
+        """Return Polymarket USDC balance for the Gnosis Safe wallet, or None
+        if dry-run / unable to query."""
+        if self.dry_run or not self.connected or self.client is None:
+            return None
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self.SIGNATURE_TYPE_POLY_GNOSIS_SAFE,
+            )
+            resp = self.client.get_balance_allowance(params)
+            if isinstance(resp, dict):
+                bal_raw = resp.get("balance")
+                if bal_raw is not None:
+                    return float(int(bal_raw) / 1_000_000.0)
+            return None
+        except Exception as e:
+            self.last_error = f"balance query failed: {type(e).__name__}: {e}"
+            return None
+
+    def place_buy(self, token_id: str, price: float, size_shares: float) -> Tuple[Optional[str], str]:
+        """Place a GTC limit BUY on the CLOB.
+        Returns (order_id, status). status is one of:
+          'placed' / 'rejected:<reason>' / 'error:<reason>' / 'dry_run' / 'not_connected'
+        """
+        if self.dry_run:
+            return ("DRYRUN-" + str(int(time.time() * 1000)), "dry_run")
+        if not self.connected or self.client is None:
+            return (None, "not_connected")
+        try:
+            from py_clob_client.clob_types import OrderArgs
+            args = OrderArgs(
+                price=round(float(price), 4),
+                size=round(float(size_shares), 4),
+                side="BUY",
+                token_id=str(token_id),
+            )
+            signed = self.client.create_order(args)
+            resp = self.client.post_order(signed)
+            if isinstance(resp, dict):
+                if resp.get("success") or resp.get("orderID") or resp.get("orderId"):
+                    oid = str(resp.get("orderID") or resp.get("orderId") or "?")
+                    return (oid, "placed")
+                err = resp.get("errorMsg") or resp.get("error") or str(resp)
+                return (None, f"rejected:{err}")
+            return (None, "rejected:unexpected_response")
+        except Exception as e:
+            self.last_error = f"place_buy failed: {type(e).__name__}: {e}"
+            return (None, f"error:{type(e).__name__}")
+
+    def cancel(self, order_id: str) -> bool:
+        if self.dry_run or not self.connected or self.client is None:
+            return True
+        try:
+            self.client.cancel(order_id=order_id)
+            return True
+        except Exception as e:
+            self.last_error = f"cancel failed: {type(e).__name__}: {e}"
+            return False
+
+    def fetch_open_orders(self) -> list:
+        if self.dry_run or not self.connected or self.client is None:
+            return []
+        try:
+            return self.client.get_orders() or []
+        except Exception as e:
+            self.last_error = f"fetch_orders failed: {type(e).__name__}: {e}"
+            return []
+
+
 class DualResearchLogger:
     def __init__(self, data_dir: str = DATA_DIR) -> None:
         self.data_dir = data_dir
@@ -423,6 +577,15 @@ class Polymarket5mDualBot:
     def __init__(self, binance_engine: BinanceEngine, logger: DualResearchLogger):
         self.binance = binance_engine
         self.logger = logger
+        # Live trading wiring (set from main() after construction).
+        # When dry_run=True (default), V3's virtual fill simulation runs as before.
+        # When dry_run=False, _try_execute_bot_buy calls self.wallet.place_buy().
+        self.dry_run: bool = True
+        self.wallet: Optional["Wallet"] = None
+        # Daily loss tracking (enforced when dry_run=False).
+        self.daily_realized_pnl: float = 0.0
+        self.daily_realized_date: str = ""
+        self.killed_for_daily_loss: bool = False
         self.current = {
             "input_url": None,
             "prefix": None,
@@ -860,6 +1023,9 @@ class Polymarket5mDualBot:
     async def load_initial_market_from_user(self) -> None:
         print("הדבק כתובת שוק 5 דקות")
         url = input().strip()
+        await self.load_initial_market_from_url(url)
+
+    async def load_initial_market_from_url(self, url: str) -> None:
         slug, prefix, suffix = self.parse_initial_url(url)
         self.current.update({
             "input_url": url,
@@ -1299,11 +1465,62 @@ class Polymarket5mDualBot:
             bot.last_decision = "WAIT"
             bot.last_note = f"{side} no liquidity <= {price_limit:.2f}"
             return
-        spent, filled_qty, avg_fill = self._simulate_fill_up_to_cap(side, spend_cap, price_limit)
-        if spent <= 0 or filled_qty <= 0 or avg_fill is None:
-            bot.last_decision = "WAIT"
-            bot.last_note = "fill simulation failed"
-            return
+
+        # ============================================================
+        # LIVE vs DRY-RUN branch
+        # ============================================================
+        if self.dry_run:
+            # V3 simulation path (unchanged)
+            spent, filled_qty, avg_fill = self._simulate_fill_up_to_cap(side, spend_cap, price_limit)
+            if spent <= 0 or filled_qty <= 0 or avg_fill is None:
+                bot.last_decision = "WAIT"
+                bot.last_note = "fill simulation failed"
+                return
+            live_order_id = None
+        else:
+            # LIVE path: enforce daily loss cap, refuse if killed, then place real order.
+            if self._check_and_update_daily_kill():
+                bot.last_decision = "BLOCKED"
+                bot.last_note = f"daily loss cap hit (${MAX_DAILY_LOSS_USD:.0f})"
+                return
+            if self.wallet is None or not self.wallet.connected:
+                bot.last_decision = "BLOCKED"
+                bot.last_note = "wallet not connected"
+                return
+            # Refuse if wallet balance is over the safety cap (shouldn't be funded that high).
+            bal = self.wallet.get_usdc_balance()
+            if bal is not None and bal > MAX_WALLET_USD:
+                bot.last_decision = "BLOCKED"
+                bot.last_note = f"wallet ${bal:.2f} > cap ${MAX_WALLET_USD:.0f}"
+                return
+            # Compute order parameters: place at price_limit for spend_cap dollars.
+            order_price = round(min(price_limit, 0.99), 4)  # never above 0.99
+            order_shares = round(spend_cap / order_price, 4)
+            if order_shares < 5.0:  # Polymarket CLOB minimum is ~5 shares
+                bot.last_decision = "WAIT"
+                bot.last_note = f"order size {order_shares:.2f} below minimum (5)"
+                return
+            token_id = self.current.get("yes_token") if side == "UP" else self.current.get("no_token")
+            if not token_id:
+                bot.last_decision = "WAIT"
+                bot.last_note = f"{side} token_id missing — cannot place live order"
+                return
+            order_id, status = self.wallet.place_buy(str(token_id), order_price, order_shares)
+            if not order_id or not status.startswith(("placed", "dry_run")):
+                bot.last_decision = "REJECTED"
+                bot.last_note = f"live order rejected: {status}"
+                self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_REJECTED",
+                                       f"side={side} price={order_price} size={order_shares} status={status}")
+                return
+            # Optimistically record fill at the limit price. (True fill price could be
+            # lower; we'll reconcile later via order status polling in V2.)
+            spent = round(order_shares * order_price, 6)
+            filled_qty = order_shares
+            avg_fill = order_price
+            live_order_id = order_id
+            self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_PLACED",
+                                   f"side={side} order_id={order_id} price={order_price} size={order_shares}")
+            print(f"{ANSI_GREEN}[LIVE] {bot.name} BUY {side} @{order_price:.4f} x{order_shares:.2f} (${spent:.2f}) order_id={order_id}{ANSI_RESET}")
 
         entry_flow_side = self._flow_side_from_distance(distance)
         entry_with_flow = int(side == entry_flow_side) if entry_flow_side is not None else None
@@ -1393,6 +1610,36 @@ class Polymarket5mDualBot:
             total_mark += mark_value or 0.0
         return round(total_spent, 6), round(total_mark, 6), round(total_mark - total_spent, 6)
 
+    def _update_daily_pnl(self, pnl_delta: float) -> None:
+        """Accumulate today's realized P&L. Resets at calendar day boundary."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_realized_date != today:
+            self.daily_realized_date = today
+            self.daily_realized_pnl = 0.0
+            self.killed_for_daily_loss = False
+        self.daily_realized_pnl += pnl_delta
+
+    def _check_and_update_daily_kill(self) -> bool:
+        """Returns True if daily kill is active (bot must NOT trade).
+        Updates the killed_for_daily_loss flag. Only enforces in live mode."""
+        if self.dry_run:
+            return False
+        # day rollover handled inside _update_daily_pnl, but call once with 0 to ensure date is current
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.daily_realized_date != today:
+            self.daily_realized_date = today
+            self.daily_realized_pnl = 0.0
+            self.killed_for_daily_loss = False
+        if self.killed_for_daily_loss:
+            return True
+        if self.daily_realized_pnl <= -MAX_DAILY_LOSS_USD:
+            self.killed_for_daily_loss = True
+            self.logger.log_event(self.current.get("slug") or "-", "KILL_DAILY_LOSS",
+                                   f"daily_pnl=${self.daily_realized_pnl:.2f} cap=${MAX_DAILY_LOSS_USD:.2f}")
+            print(f"{ANSI_RED}{ANSI_BOLD}KILL SWITCH: daily loss cap hit. PnL=${self.daily_realized_pnl:.2f}. Bot will NOT place new orders today.{ANSI_RESET}")
+            return True
+        return False
+
     def _settle_bot_positions(self, bot: BotState) -> None:
         target = self.current.get("target_price")
         if target is None:
@@ -1442,6 +1689,8 @@ class Polymarket5mDualBot:
         bot.realized_payout_total += payout
         bot.realized_pnl_total += pnl
         bot.settled_markets += 1
+        # Daily P&L tracking — only matters for live mode but we accumulate always.
+        self._update_daily_pnl(pnl)
         if pnl > 1e-9:
             bot.wins += 1
             result = "WIN"
@@ -1547,9 +1796,21 @@ class Polymarket5mDualBot:
         self.current["target_source"] = target_source
         dist = None if btc_price is None or target_used is None else abs(btc_price - target_used)
 
-        print(f"{ANSI_BOLD}BTC_5M_DUAL_RESEARCH_RENDER_RETRY_V1{ANSI_RESET}")
+        mode_label = (f"{ANSI_RED}{ANSI_BOLD}LIVE TRADING{ANSI_RESET}" if not self.dry_run
+                      else f"{ANSI_CYAN}DRY-RUN (simulation){ANSI_RESET}")
+        print(f"{ANSI_BOLD}LIVE_BTC_5M_V1{ANSI_RESET}   mode={mode_label}")
         print("=" * width)
         print(f"LOCAL TIME   : {self.now_local_str()}")
+        # show daily kill / cap status when in live mode
+        if not self.dry_run:
+            kill_state = (f"{ANSI_RED}{ANSI_BOLD}KILL ACTIVE{ANSI_RESET}" if self.killed_for_daily_loss
+                          else f"{ANSI_GREEN}OK{ANSI_RESET}")
+            print(f"DAILY        : pnl=${self.daily_realized_pnl:+.2f}  cap=${MAX_DAILY_LOSS_USD:.0f}  state={kill_state}")
+            if self.wallet:
+                bal = self.wallet.get_usdc_balance()
+                bal_str = f"{bal:.2f}" if bal is not None else "?"
+                addr_str = self.wallet.address[:8] + "..." if self.wallet.address else "-"
+                print(f"WALLET       : ${bal_str}  cap=${MAX_WALLET_USD:.0f}  addr={addr_str}")
         print(f"SLUG         : {self.current['slug'] or '-'}")
         print(f"URL          : {self.current['url'] or '-'}")
         print(f"QUESTION     : {self.current['question'] or '-'}")
@@ -1669,14 +1930,81 @@ class Polymarket5mDualBot:
                 await asyncio.sleep(3)
 
 
+def parse_cli_args() -> "argparse.Namespace":
+    import argparse
+    p = argparse.ArgumentParser(
+        description="LIVE_BTC_5M_V1 — Polymarket BTC 5-min trading bot.",
+    )
+    p.add_argument("--live", action="store_true",
+                   help="Enable LIVE trading (real orders, real money). Default is dry-run simulation.")
+    p.add_argument("--url", default=None,
+                   help="Initial Polymarket 5-min event URL (skip the input prompt).")
+    return p.parse_args()
+
+
+def confirm_live_mode() -> bool:
+    """Loud, hard-to-mistake confirmation before enabling live trading."""
+    print()
+    print(f"{ANSI_RED}{ANSI_BOLD}{'=' * 70}{ANSI_RESET}")
+    print(f"{ANSI_RED}{ANSI_BOLD}  LIVE TRADING MODE  -  REAL MONEY ON POLYMARKET  {ANSI_RESET}")
+    print(f"{ANSI_RED}{ANSI_BOLD}{'=' * 70}{ANSI_RESET}")
+    print(f"{ANSI_YELLOW}This bot will place REAL buy orders on Polymarket using the wallet")
+    print(f"private key in /root/.env (or local .env).{ANSI_RESET}")
+    print()
+    print(f"  Per-trade size:     ${MAX_BUY_USD:.2f}")
+    print(f"  BOT40 maker levels: {BOT40_MAKER_LEVELS}  (size ${BOT40_MAKER_SIZE_USD:.2f}/level)")
+    print(f"  BOT120 dist >=:     {MIN_DIST_BOT120:.0f}, price cap {BOT120_MAX_PRICE:.2f}")
+    print(f"  Daily loss cap:     ${MAX_DAILY_LOSS_USD:.2f}  (bot stops itself)")
+    print(f"  Wallet cap:         ${MAX_WALLET_USD:.2f}  (refuse trade if exceeded)")
+    print()
+    answer = input("Type the words 'go live' to confirm, anything else cancels: ").strip().lower()
+    if answer != "go live":
+        print(f"{ANSI_YELLOW}Live mode NOT confirmed. Exiting.{ANSI_RESET}")
+        return False
+    print(f"{ANSI_GREEN}Confirmed. Live trading enabled.{ANSI_RESET}")
+    return True
+
+
 async def main() -> None:
+    args = parse_cli_args()
+    dry_run = not args.live
+    if args.live:
+        if not confirm_live_mode():
+            return
+
+    # initialize wallet (no-op in dry-run)
+    wallet = Wallet(dry_run=dry_run)
+    if not dry_run:
+        print("Connecting to Polymarket CLOB...")
+        if not wallet.connect():
+            print(f"{ANSI_RED}CLOB connect failed: {wallet.last_error}{ANSI_RESET}")
+            return
+        bal = wallet.get_usdc_balance()
+        if bal is None:
+            print(f"{ANSI_YELLOW}Warning: could not read wallet balance ({wallet.last_error}). Continuing anyway.{ANSI_RESET}")
+        else:
+            print(f"Wallet USDC balance: ${bal:.2f}")
+            if bal > MAX_WALLET_USD:
+                print(f"{ANSI_RED}Wallet balance ${bal:.2f} exceeds cap ${MAX_WALLET_USD:.2f}. Refusing to trade.{ANSI_RESET}")
+                print(f"{ANSI_RED}Withdraw funds first or raise MAX_WALLET_USD in code.{ANSI_RESET}")
+                return
+            if bal < MAX_BUY_USD:
+                print(f"{ANSI_YELLOW}Warning: wallet balance ${bal:.2f} is less than per-trade size ${MAX_BUY_USD:.2f}. Trades may fail.{ANSI_RESET}")
+
+    print(f"\nMode: {'LIVE TRADING' if not dry_run else 'DRY-RUN (simulation)'}")
     logger = DualResearchLogger()
     logger.clear_and_init()
     binance = BinanceEngine()
     binance_task = asyncio.create_task(binance.run())
     bot = Polymarket5mDualBot(binance, logger)
+    # attach mode + wallet to bot so _try_execute_bot_buy can route accordingly
+    bot.dry_run = dry_run
+    bot.wallet = wallet
     try:
-        await bot.load_initial_market_from_user()
+        if args.url:
+            await bot.load_initial_market_from_url(args.url)
+        else:
+            await bot.load_initial_market_from_user()
         bot.print_status()
         await bot.stream_current_market()
     finally:
@@ -1691,12 +2019,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        if sys.platform.startswith("win"):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
+    # NOTE: do NOT set WindowsSelectorEventLoopPolicy on Windows — that breaks
+    # Playwright's subprocess spawn. The default ProactorEventLoop is correct.
+    # (V3 originally set Selector; we leave it on default.)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nנעצר.")
+        print("\nstopped.")
