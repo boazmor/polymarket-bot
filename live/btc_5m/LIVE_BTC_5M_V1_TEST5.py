@@ -3,7 +3,7 @@
 LIVE_BTC_5M_V1.py
 =================
 Live trading bot for Polymarket BTC 5-min Up/Down markets.
-Forked from research bot V3 (good_working_bot_kululu_V3.py) — same engine,
+Forked from research bot V3 (good_working_bot_kululu_V3.py) ג€” same engine,
 same screen, same market manager. Strategy switched from TAKER (V3) to MAKER
 (passive limit orders) per user request 2026-04-30.
 
@@ -71,7 +71,7 @@ HEARTBEAT_EVERY_SEC = 10
 STALE_AFTER_SEC = 20
 SCREEN_REFRESH_EVERY_SEC = 1
 BOT40_MAX_SEC = 40
-BOT120_MIN_SEC = 0           # CHANGED FROM V3 (was 41) — V4-style, full window
+BOT120_MIN_SEC = 0           # CHANGED FROM V3 (was 41) ג€” V4-style, full window
 BOT120_MAX_SEC = 120
 ENTRY_THRESHOLD = 0.35
 DATA_DIR = "data_live_btc_5m_v1"
@@ -85,10 +85,10 @@ ANSI_CYAN = "\033[36m"
 ANSI_WHITE = "\033[37m"
 ANSI_DIM = "\033[2m"
 ANSI_BLINK = "\033[5m"
-MIN_DIST_BOT120 = 68.0           # CHANGED FROM V3 (was 60.0) — user request
+MIN_DIST_BOT120 = 68.0           # CHANGED FROM V3 (was 60.0) ג€” user request
 BOT40_LIMIT_END_SEC = 30
 BOT40_FALLBACK_PRICE = 0.35
-BOT120_MAX_PRICE = 0.80          # NEW vs V3 — price cap on BOT120 buys
+BOT120_MAX_PRICE = 0.80          # NEW vs V3 ג€” price cap on BOT120 buys
 RENDER_RETRY_WINDOW_SEC = 20
 RENDER_RETRY_INTERVAL_SEC = 2
 BOT40_FLOW_DIST_THRESHOLD = 25.0
@@ -98,20 +98,20 @@ BOT120_RESEARCH_SECONDS = [55, 57, 59, 62, 64]
 BOT120_RESEARCH_DISTANCE_LEVELS = [55.0, 57.0, 59.0, 62.0, 64.0]
 
 # ============================================================================
-# LIVE TRADING — strategy and safety constants
+# LIVE TRADING ג€” strategy and safety constants
 # ============================================================================
 # Maker model: BOT40 phase 1 places THREE simultaneous limit orders at these
 # price levels.  Each level gets BOT40_MAKER_SIZE_USD of capital reserved.
 # Total in book = 3 * BOT40_MAKER_SIZE_USD.  Cap on actual fills = MAX_BUY_USD.
 BOT40_MAKER_LEVELS = [0.28, 0.29, 0.30]
 
-# Production size — same for virtual (dry-run) testing and for live trading.
+# Production size ג€” same for virtual (dry-run) testing and for live trading.
 # Virtual uses no real money so size is risk-free for testing.
-MAX_BUY_USD = 100.0
-BOT40_MAKER_SIZE_USD = 60.0      # 3 simultaneous orders -> $180 reserved in book; cap actual fills at MAX_BUY_USD
+MAX_BUY_USD = 5.0       # TEST FILE — limited to $5/trade for first live verification
+BOT40_MAKER_SIZE_USD = 3.0   # TEST FILE      # 3 simultaneous orders -> $180 reserved in book; cap actual fills at MAX_BUY_USD
 
 # Safety stops (enforced inside the bot, not just policy)
-MAX_DAILY_LOSS_USD = 40.0        # bot kills itself after this much realized loss today
+MAX_DAILY_LOSS_USD = 15.0    # TEST FILE — tighter cap for testing        # bot kills itself after this much realized loss today
 MAX_WALLET_USD = 200.0           # bot refuses to trade if wallet balance > this
 
 # Modes
@@ -275,19 +275,19 @@ class BinanceEngine:
 
 
 # ============================================================================
-# WALLET — CLOB integration for live trading
+# WALLET ג€” CLOB integration for live trading
 # ============================================================================
 class Wallet:
     """Polymarket CLOB wallet wrapper.
     Loads .env, creates ClobClient with signature_type=2 (Gnosis Safe proxy
-    — confirmed via reference_polymarket_wallet_setup memory), derives API
+    ג€” confirmed via reference_polymarket_wallet_setup memory), derives API
     credentials, and exposes order placement / cancellation / balance query.
 
     In dry-run mode the wallet is inert: place_buy returns a fake order_id
-    and balance returns None — the bot's V3 simulation logic kicks in instead.
+    and balance returns None ג€” the bot's V3 simulation logic kicks in instead.
     """
 
-    SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2  # discovered 2026-05-01 — see memory
+    SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2  # discovered 2026-05-01 ג€” see memory
 
     def __init__(self, dry_run: bool, env_paths: Optional[List[str]] = None):
         self.dry_run = dry_run
@@ -332,7 +332,7 @@ class Wallet:
         """Initialize ClobClient and derive API credentials. Only needed for
         live mode. Returns True on success, False otherwise (last_error is set)."""
         if self.dry_run:
-            return True  # nothing to do — dry-run uses V3 simulation
+            return True  # nothing to do ג€” dry-run uses V3 simulation
         if not self._load_env():
             return False
         try:
@@ -692,7 +692,7 @@ class Polymarket5mDualBot:
 
     def extract_target_from_page(self, url: str) -> Optional[float]:
         """Plain HTTP fetch + regex (legacy fallback). Try __NEXT_DATA__ first via
-        extract_target_from_next_data — that's the reliable browser-free method.
+        extract_target_from_next_data ג€” that's the reliable browser-free method.
         """
         try:
             r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
@@ -785,14 +785,14 @@ class Polymarket5mDualBot:
                         return x
             return None
 
-        # 1) exact slug match — preferred
+        # 1) exact slug match ג€” preferred
         for path, ev in events:
             if ev.get("slug") == slug:
                 target = read_price_to_beat(ev)
                 if target is not None:
                     return target, "next_data_slug_match"
 
-        # 2) suffix match — slug ends with same numeric epoch
+        # 2) suffix match ג€” slug ends with same numeric epoch
         m_suffix = re.search(r"(\d+)$", slug)
         epoch_str = m_suffix.group(1) if m_suffix else None
         if epoch_str:
@@ -1021,7 +1021,7 @@ class Polymarket5mDualBot:
         self._render_task = asyncio.create_task(self._capture_rendered_page_target())
 
     async def load_initial_market_from_user(self) -> None:
-        print("הדבק כתובת שוק 5 דקות")
+        print("׳”׳“׳‘׳§ ׳›׳×׳•׳‘׳× ׳©׳•׳§ 5 ׳“׳§׳•׳×")
         url = input().strip()
         await self.load_initial_market_from_url(url)
 
@@ -1037,7 +1037,7 @@ class Polymarket5mDualBot:
         })
         market = self.fetch_market_by_slug(slug)
         if not market:
-            raise RuntimeError(f"לא נמצא שוק עבור slug: {slug}")
+            raise RuntimeError(f"׳׳ ׳ ׳׳¦׳ ׳©׳•׳§ ׳¢׳‘׳•׳¨ slug: {slug}")
         self.current.update(market)
         self.current["market_loaded_at"] = time.time()
         self._capture_binance_prev_5m_close_target()
@@ -1503,7 +1503,7 @@ class Polymarket5mDualBot:
             token_id = self.current.get("yes_token") if side == "UP" else self.current.get("no_token")
             if not token_id:
                 bot.last_decision = "WAIT"
-                bot.last_note = f"{side} token_id missing — cannot place live order"
+                bot.last_note = f"{side} token_id missing ג€” cannot place live order"
                 return
             order_id, status = self.wallet.place_buy(str(token_id), order_price, order_shares)
             if not order_id or not status.startswith(("placed", "dry_run")):
@@ -1634,11 +1634,8 @@ class Polymarket5mDualBot:
             return True
         if self.daily_realized_pnl <= -MAX_DAILY_LOSS_USD:
             self.killed_for_daily_loss = True
-            try:
-                self.logger.log_event(self.current.get("slug") or "-", "KILL_DAILY_LOSS",
-                                       f"daily_pnl=${self.daily_realized_pnl:.2f} cap=${MAX_DAILY_LOSS_USD:.2f}")
-            except Exception:
-                pass
+            self.logger.log_event(self.current.get("slug") or "-", "KILL_DAILY_LOSS",
+                                   f"daily_pnl=${self.daily_realized_pnl:.2f} cap=${MAX_DAILY_LOSS_USD:.2f}")
             print(f"{ANSI_RED}{ANSI_BOLD}KILL SWITCH: daily loss cap hit. PnL=${self.daily_realized_pnl:.2f}. Bot will NOT place new orders today.{ANSI_RESET}")
             return True
         return False
@@ -1692,7 +1689,7 @@ class Polymarket5mDualBot:
         bot.realized_payout_total += payout
         bot.realized_pnl_total += pnl
         bot.settled_markets += 1
-        # Daily P&L tracking — only matters for live mode but we accumulate always.
+        # Daily P&L tracking ג€” only matters for live mode but we accumulate always.
         self._update_daily_pnl(pnl)
         if pnl > 1e-9:
             bot.wins += 1
@@ -1754,7 +1751,7 @@ class Polymarket5mDualBot:
         self.current["url"] = self.build_url_from_slug(self.current["slug"])
         market = self.fetch_market_by_slug(self.current["slug"])
         if not market:
-            raise RuntimeError(f"לא נמצא שוק עבור slug הבא: {self.current['slug']}")
+            raise RuntimeError(f"׳׳ ׳ ׳׳¦׳ ׳©׳•׳§ ׳¢׳‘׳•׳¨ slug ׳”׳‘׳: {self.current['slug']}")
         self.current.update(market)
         self.current["market_loaded_at"] = time.time()
         self._render_task = None
@@ -1868,7 +1865,7 @@ class Polymarket5mDualBot:
         print(f"BOT40 TOTAL_PROFIT : {color_money(bot40_total_profit)}")
         print(f"BOT120 TOTAL_PROFIT: {color_money(bot120_total_profit)}")
         print(f"COMBINED: TRADES={combined_trades}   TOTAL_PROFIT={color_money(combined_profit)}")
-        print("Ctrl+C כדי לעצור")
+        print("Ctrl+C ׳›׳“׳™ ׳׳¢׳¦׳•׳¨")
 
     async def stream_current_market(self) -> None:
         ssl_ctx = ssl.create_default_context()
@@ -1936,7 +1933,7 @@ class Polymarket5mDualBot:
 def parse_cli_args() -> "argparse.Namespace":
     import argparse
     p = argparse.ArgumentParser(
-        description="LIVE_BTC_5M_V1 — Polymarket BTC 5-min trading bot.",
+        description="LIVE_BTC_5M_V1 ג€” Polymarket BTC 5-min trading bot.",
     )
     p.add_argument("--live", action="store_true",
                    help="Enable LIVE trading (real orders, real money). Default is dry-run simulation.")
@@ -2022,7 +2019,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # NOTE: do NOT set WindowsSelectorEventLoopPolicy on Windows — that breaks
+    # NOTE: do NOT set WindowsSelectorEventLoopPolicy on Windows ג€” that breaks
     # Playwright's subprocess spawn. The default ProactorEventLoop is correct.
     # (V3 originally set Selector; we leave it on default.)
     try:
