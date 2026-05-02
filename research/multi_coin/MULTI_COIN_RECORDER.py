@@ -161,12 +161,40 @@ def floor_to_5m_epoch(epoch_s: Optional[int] = None) -> int:
     return (epoch_s // 300) * 300
 
 
+def _et_tz():
+    """Return the ET timezone (handles EDT/EST automatically). Falls back to a
+    fixed -4 offset (EDT) if zoneinfo is unavailable."""
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/New_York")
+    except Exception:
+        from datetime import timezone as _tz, timedelta as _td
+        return _tz(_td(hours=-4))
+
+
 def floor_to_window_epoch(epoch_s: Optional[int] = None) -> int:
-    """Round time down to the current WINDOW boundary."""
+    """Round time down to the current WINDOW boundary.
+    For 1h/1d (calendar slugs) the floor is computed in ET, NOT UTC, so the
+    floored epoch maps to the correct ET hour/date."""
     if epoch_s is None:
         epoch_s = now_epoch_s()
-    step = WINDOW_CONFIG[WINDOW]["step"]
-    return (epoch_s // step) * step
+    cfg = WINDOW_CONFIG[WINDOW]
+    pattern = cfg["pattern"]
+    if pattern == "epoch":
+        # 5m, 15m, 4h — UTC-aligned epoch boundaries
+        step = cfg["step"]
+        return (epoch_s // step) * step
+    elif pattern == "calendar_h":
+        from datetime import datetime as _dt
+        et = _dt.fromtimestamp(epoch_s, tz=_et_tz())
+        floored = et.replace(minute=0, second=0, microsecond=0)
+        return int(floored.timestamp())
+    elif pattern == "calendar_d":
+        from datetime import datetime as _dt
+        et = _dt.fromtimestamp(epoch_s, tz=_et_tz())
+        floored = et.replace(hour=0, minute=0, second=0, microsecond=0)
+        return int(floored.timestamp())
+    raise ValueError(f"unknown window pattern: {pattern}")
 
 
 def build_window_slug(epoch_s: Optional[int] = None) -> str:
@@ -180,27 +208,19 @@ def build_window_slug(epoch_s: Optional[int] = None) -> str:
         ep = (epoch_s // cfg["step"]) * cfg["step"]
         short = COIN_SHORT_NAMES.get(COIN, COIN.lower())
         return f"{short}-updown-{WINDOW}-{ep}"
-    elif cfg["pattern"] == "calendar_h":
-        # bitcoin-up-or-down-may-2-2026-12pm-et
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        ts = _dt.fromtimestamp(epoch_s, tz=_tz.utc) + _td(hours=-4)  # ET (EDT in May)
-        ts = ts.replace(minute=0, second=0, microsecond=0)
-        month = ts.strftime("%B").lower()
-        day = ts.day
-        year = ts.year
-        hour_12 = ts.hour % 12 or 12
-        ampm = "am" if ts.hour < 12 else "pm"
-        long = COIN_LONG_NAMES.get(COIN, COIN.lower())
-        return f"{long}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
-    elif cfg["pattern"] == "calendar_d":
-        # bitcoin-up-or-down-on-may-2-2026
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        ts = _dt.fromtimestamp(epoch_s, tz=_tz.utc) + _td(hours=-4)
+    elif cfg["pattern"] in ("calendar_h", "calendar_d"):
+        from datetime import datetime as _dt
+        ts = _dt.fromtimestamp(epoch_s, tz=_et_tz())
         month = ts.strftime("%B").lower()
         day = ts.day
         year = ts.year
         long = COIN_LONG_NAMES.get(COIN, COIN.lower())
-        return f"{long}-up-or-down-on-{month}-{day}-{year}"
+        if cfg["pattern"] == "calendar_h":
+            hour_12 = ts.hour % 12 or 12
+            ampm = "am" if ts.hour < 12 else "pm"
+            return f"{long}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
+        else:  # calendar_d
+            return f"{long}-up-or-down-on-{month}-{day}-{year}"
     raise ValueError(f"unknown window pattern: {cfg['pattern']}")
 
 
