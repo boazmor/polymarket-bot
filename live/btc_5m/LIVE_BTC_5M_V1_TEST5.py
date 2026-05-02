@@ -69,7 +69,7 @@ POLYGON_CHAIN_ID = 137
 
 HEARTBEAT_EVERY_SEC = 10
 STALE_AFTER_SEC = 20
-SCREEN_REFRESH_EVERY_SEC = 1
+SCREEN_REFRESH_EVERY_SEC = 2   # CHANGED 02/05 — bumped from 1 to 2 to reduce flicker on PowerShell
 BOT40_MAX_SEC = 40
 BOT120_MIN_SEC = 0           # CHANGED FROM V3 (was 41) ג€” V4-style, full window
 BOT120_MAX_SEC = 120
@@ -85,10 +85,11 @@ ANSI_CYAN = "\033[36m"
 ANSI_WHITE = "\033[37m"
 ANSI_DIM = "\033[2m"
 ANSI_BLINK = "\033[5m"
-MIN_DIST_BOT120 = 68.0           # CHANGED FROM V3 (was 60.0) ג€” user request
+MIN_DIST_BOT120 = 60.0           # CHANGED 02/05 evening — user lowered from 68 to 60
 BOT40_LIMIT_END_SEC = 30
 BOT40_FALLBACK_PRICE = 0.35
-BOT120_MAX_PRICE = 0.80          # NEW vs V3 ג€” price cap on BOT120 buys
+BOT120_MAX_PRICE = 0.80          # legacy — no longer used in maker-style BOT120
+BOT120_LIMIT_PRICE = 0.50        # NEW 02/05 — BOT120 now places LIMIT order at 0.50 (maker pattern)
 RENDER_RETRY_WINDOW_SEC = 20
 RENDER_RETRY_INTERVAL_SEC = 2
 BOT40_FLOW_DIST_THRESHOLD = 25.0
@@ -656,7 +657,10 @@ class Polymarket5mDualBot:
 
     @staticmethod
     def clear_screen() -> None:
-        print("\033[2J\033[H", end="")
+        # CHANGED 02/05: do NOT clear — just move cursor to home + hide cursor.
+        # New content overwrites old line-by-line. End of redraw emits \033[J to wipe
+        # any leftover from longer previous frames. Net effect: ZERO flicker.
+        print("\033[H\033[?25l", end="")
 
     def parse_initial_url(self, url: str) -> Tuple[str, str, int]:
         url = url.strip()
@@ -1296,6 +1300,8 @@ class Polymarket5mDualBot:
         return eligible[0][0]
 
     def _choose_bot120_side(self, sec: int) -> Optional[str]:
+        # CHANGED 02/05: BOT120 is now MAKER-style — places limit at BOT120_LIMIT_PRICE (0.50)
+        # regardless of current ask. Order sits on book until filled or market settles.
         if not (BOT120_MIN_SEC <= sec <= BOT120_MAX_SEC):
             return None
         btc, target, distance = self._distance_fields()
@@ -1306,10 +1312,9 @@ class Polymarket5mDualBot:
         direction_side = "UP" if distance > 0 else "DOWN"
         if self.bot120.last_buy and self.bot120.last_buy.get("side") != direction_side:
             return None
-        ask = self.prices[direction_side]["best_ask"]
-        if ask is None or not self._side_has_fresh_ask_for_current_market(direction_side):
-            return None
-        if ask > BOT120_MAX_PRICE:
+        # No longer reject based on current ask — we place a limit order at 0.50 instead.
+        # Just confirm we have a fresh order book (not stale data).
+        if not self._side_has_fresh_ask_for_current_market(direction_side):
             return None
         return direction_side
 
@@ -1456,12 +1461,11 @@ class Polymarket5mDualBot:
                 bot.last_note = f"{side} ask not valid"
                 return
         else:
-            mode = "MARKET_ANY"
-            price_limit = 1.0
-            if best_ask is None:
-                bot.last_decision = "WAIT"
-                bot.last_note = f"{side} ask missing"
-                return
+            # BOT120: MAKER pattern — place limit order at 0.50, sits on book until filled
+            mode = "LIMIT_050"
+            price_limit = BOT120_LIMIT_PRICE
+            # No best_ask check — we're placing limit, not taker. Liquidity check below
+            # uses _qty_notional_le(side, 0.50) to see what could match if market drops.
 
         if bot.last_buy and bot.last_buy.get("side") != side:
             bot.last_decision = "WAIT"
@@ -1470,11 +1474,16 @@ class Polymarket5mDualBot:
 
         avail_qty, avail_notional = self._qty_notional_le(side, price_limit)
         remaining_cap = max(0.0, MAX_BUY_USD - bot.current_market_spent)
-        spend_cap = min(remaining_cap, avail_notional or 0.0)
-        if spend_cap <= 0:
-            bot.last_decision = "WAIT"
-            bot.last_note = f"{side} no liquidity <= {price_limit:.2f}"
-            return
+        if bot is self.bot120:
+            # MAKER mode: don't require existing liquidity below 0.50.
+            # The order sits on the book; we want to be there waiting.
+            spend_cap = remaining_cap
+        else:
+            spend_cap = min(remaining_cap, avail_notional or 0.0)
+            if spend_cap <= 0:
+                bot.last_decision = "WAIT"
+                bot.last_note = f"{side} no liquidity <= {price_limit:.2f}"
+                return
 
         # ============================================================
         # LIVE vs DRY-RUN branch
@@ -1797,7 +1806,22 @@ class Polymarket5mDualBot:
         ]
 
     def print_status(self) -> None:
-        self.clear_screen()
+        # CHANGED 02/05: redirect stdout to a buffer so the entire frame goes to
+        # the terminal as ONE write — eliminates flicker from incremental redraws.
+        import io as _io
+        _saved_stdout = sys.stdout
+        _buf = _io.StringIO()
+        sys.stdout = _buf
+        try:
+            self._render_status_into_buffer()
+        finally:
+            sys.stdout = _saved_stdout
+        # \033[H = cursor home, \033[J = clear from cursor to end of screen
+        sys.stdout.write("\033[H\033[?25l" + _buf.getvalue() + "\033[J")
+        sys.stdout.flush()
+
+    def _render_status_into_buffer(self) -> None:
+        # body of the original print_status — all print() calls here go to the buffer
         width = 118
         btc = self.binance.snapshot()
         updated = datetime.fromtimestamp(btc['updated_at']).strftime('%Y-%m-%d %H:%M:%S') if btc['updated_at'] else '-'
