@@ -112,7 +112,7 @@ MAX_BUY_USD = 1.0       # TEST FILE — $1/trade (Polymarket minimum) for max st
 BOT40_MAKER_SIZE_USD = 1.0   # TEST FILE      # $1 per maker order level (also Polymarket minimum)
 
 # Safety stops (enforced inside the bot, not just policy)
-MAX_DAILY_LOSS_USD = 15.0    # TEST FILE — tighter cap for testing        # bot kills itself after this much realized loss today
+MAX_DAILY_LOSS_USD = 50.0    # TEST FILE — effectively disabled for $1 trades. Re-tighten when scaling up.
 MAX_WALLET_USD = 500.0           # bot refuses to trade if wallet balance > this
 
 # Modes
