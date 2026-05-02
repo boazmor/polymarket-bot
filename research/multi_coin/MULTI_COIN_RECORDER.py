@@ -61,6 +61,21 @@ DATA_DIR = "data_ws_binance_poly_research"
 COIN: str = "BTC"
 BINANCE_TICKER: str = "BTCUSDT"
 SLUG_PREFIX: str = "btc-updown-5m-"
+
+# Polymarket's own Chainlink RTDS WebSocket — same source they use for market resolution.
+# The price at sec=0 of each market becomes our authoritative target_price.
+CHAINLINK_WS = "wss://ws-live-data.polymarket.com"
+CHAINLINK_SYMBOL: str = "btc/usd"   # set by main() based on coin
+
+COIN_TO_CHAINLINK_SYMBOL = {
+    "BTC":  "btc/usd",
+    "ETH":  "eth/usd",
+    "SOL":  "sol/usd",
+    "XRP":  "xrp/usd",
+    "DOGE": "doge/usd",
+    "BNB":  "bnb/usd",
+    "HYPE": "hype/usd",
+}
 HTTP_TIMEOUT = 20
 SCREEN_REFRESH_SEC = 1.0
 STALE_AFTER_SEC = 10.0
@@ -193,6 +208,87 @@ def parse_target_from_market_obj(market_obj: dict, question: str = "") -> Option
     except Exception:
         return parse_target_from_question(question)
 
+def extract_target_from_next_data(url: str, slug: str) -> Optional[float]:
+    """Browser-free target extraction. Polymarket pages embed all market metadata
+    in a <script id="__NEXT_DATA__"> JSON tag. Fetch the page with plain HTTP,
+    parse the JSON, find the event whose slug matches our market, and return
+    its eventMetadata.priceToBeat. Avoids Playwright entirely.
+    """
+    try:
+        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        })
+        r.raise_for_status()
+        html = r.text
+    except Exception:
+        return None
+    m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                  html, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+    events = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if "slug" in obj and ("eventMetadata" in obj or "priceToBeat" in obj):
+                events.append(obj)
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+
+    def read_ptb(event):
+        meta = event.get("eventMetadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        for d in (meta, event):
+            if not isinstance(d, dict):
+                continue
+            for k in ("priceToBeat", "price_to_beat", "targetPrice", "target_price"):
+                v = d.get(k)
+                if v is None:
+                    continue
+                try:
+                    x = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < x < 10_000_000:  # generous range — works for $0.10 (DOGE) up to $1M (extreme BTC)
+                    return x
+        return None
+
+    # 1. exact slug match
+    for ev in events:
+        if ev.get("slug") == slug:
+            v = read_ptb(ev)
+            if v is not None:
+                return v
+    # 2. epoch-suffix match
+    m_suf = re.search(r"(\d+)$", slug)
+    epoch = m_suf.group(1) if m_suf else None
+    if epoch:
+        for ev in events:
+            ev_slug = ev.get("slug") or ""
+            m_ev = re.search(r"(\d+)$", ev_slug)
+            if m_ev and m_ev.group(1) == epoch:
+                v = read_ptb(ev)
+                if v is not None:
+                    return v
+    return None
+
+
 def extract_target_from_html(url: str) -> Optional[float]:
     """Fast HTTP fallback for Price to Beat / target from the public page HTML."""
     try:
@@ -217,6 +313,14 @@ def extract_target_from_html(url: str) -> Optional[float]:
 
 
 def extract_target_from_rendered_page(url: str) -> Tuple[Optional[float], str]:
+    """DISABLED 2026-05-02 — was crashing the server (6 Chromium browsers on
+    4GB RAM caused load=33 and OOM). Chainlink WS now provides the canonical
+    target via target_chainlink_at_open. This stub returns immediately so the
+    fallback chain doesn't spawn browsers."""
+    return None, "playwright_disabled_use_chainlink"
+
+
+def _DISABLED_extract_target_from_rendered_page(url: str) -> Tuple[Optional[float], str]:
     """Reliable target capture using rendered Polymarket page.
 
     Returns: (target_price, error_text)
@@ -340,7 +444,8 @@ class MarketInfo:
     question: str = ""
     start_iso: str = ""
     end_iso: str = ""
-    target_price: Optional[float] = None
+    target_price: Optional[float] = None     # legacy field (from Gamma/HTML/Playwright)
+    target_chainlink_at_open: Optional[float] = None  # NEW — the canonical target = Chainlink price at first tick of this market
     up_token: Optional[str] = None
     down_token: Optional[str] = None
 
@@ -366,6 +471,9 @@ class CsvStore:
         self._init_csv(self.paths["combined"], [
             "local_ts", "epoch_sec", "market_slug", "market_epoch", "sec_from_start",
             "binance_price", "binance_age_sec", "target_price", "distance_signed", "distance_abs",
+            # NEW columns — Chainlink RTDS (canonical resolution source)
+            "chainlink_price", "chainlink_age_sec",
+            "target_chainlink_at_open", "distance_chainlink_signed", "distance_chainlink_abs",
             "up_bid", "up_ask", "up_last", "up_ask_qty_best", "up_usd_best",
             "up_qty_le_029", "up_usd_le_029", "up_qty_le_030", "up_usd_le_030",
             "up_qty_le_031", "up_usd_le_031", "up_qty_le_032", "up_usd_le_032",
@@ -375,7 +483,7 @@ class CsvStore:
             "down_qty_le_031", "down_usd_le_031", "down_qty_le_032", "down_usd_le_032",
             "down_qty_le_035", "down_usd_le_035", "down_age_sec",
             "delta_1s", "delta_5s", "delta_10s", "delta_30s", "volatility_30s",
-            "poly_updates_total", "binance_ticks_total", "market_url",
+            "poly_updates_total", "binance_ticks_total", "chainlink_ticks_total", "market_url",
         ])
         self._init_csv(self.paths["binance_ticks"], [
             "local_ts", "event_time_ms", "trade_time_ms", "price", "qty", "latency_ms", "raw_len"
@@ -441,6 +549,12 @@ class RecorderState:
         self.target_last_error: str = "-"
         self.started_at: float = time.time()
         self.should_stop: bool = False
+        # NEW — Polymarket Chainlink RTDS feed (same source they use for resolution)
+        self.chainlink_price: Optional[float] = None
+        self.chainlink_update_ts: float = 0.0
+        self.chainlink_ticks_total: int = 0
+        self.chainlink_status: str = "starting"
+        self.reconnects_chainlink: int = 0
 
     def distance_signed(self) -> Optional[float]:
         if self.market is None or self.market.target_price is None or self.binance_price is None:
@@ -532,6 +646,13 @@ def fetch_market_info_for_slug(slug: str) -> MarketInfo:
     suffix = int(re.search(r"(\d+)$", slug).group(1))
     url = event_url_from_slug(slug)
     target = parse_target_from_market_obj(m0, question)
+    if target is None:
+        # NEW 2026-05-01: try __NEXT_DATA__ HTTP-only extraction.
+        # Polymarket changed Gamma — eventMetadata is now null for current
+        # markets, so we must read priceToBeat from the page's __NEXT_DATA__.
+        # This is fast, browser-free, and works under load (avoids Playwright
+        # contention when many recorders run in parallel).
+        target = extract_target_from_next_data(url, slug)
     if target is None:
         target = extract_target_from_html(url)
     if target is None:
@@ -705,6 +826,61 @@ async def binance_loop(state: RecorderState, csvs: CsvStore) -> None:
             await asyncio.sleep(2)
 
 
+async def chainlink_loop(state: RecorderState, csvs: CsvStore) -> None:
+    """Subscribe to Polymarket Chainlink RTDS WebSocket for the coin's symbol.
+    The price stream here is the SAME source Polymarket uses for market resolution.
+    The price at first tick of each market is the canonical priceToBeat / target."""
+    sub_msg = {
+        "action": "subscribe",
+        "subscriptions": [{
+            "topic": "crypto_prices_chainlink",
+            "type": "*",
+            "filters": '{"symbol":"' + CHAINLINK_SYMBOL + '"}',
+        }],
+    }
+    while not state.should_stop:
+        try:
+            state.chainlink_status = "connecting"
+            async with websockets.connect(CHAINLINK_WS, ping_interval=20, ping_timeout=20,
+                                          max_size=2 ** 20) as ws:
+                await ws.send(json.dumps(sub_msg))
+                state.chainlink_status = "live"
+                csvs.event("CHAINLINK_CONNECTED", f"symbol={CHAINLINK_SYMBOL}")
+                async for raw in ws:
+                    if state.should_stop:
+                        return
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(msg, dict) or msg.get("topic") != "crypto_prices_chainlink":
+                        continue
+                    payload = msg.get("payload") or {}
+                    if not isinstance(payload, dict):
+                        continue
+                    sym = payload.get("symbol")
+                    if sym != CHAINLINK_SYMBOL:
+                        continue
+                    val = safe_float(payload.get("value"))
+                    if val is None:
+                        continue
+                    now_ts = time.time()
+                    state.chainlink_price = val
+                    state.chainlink_update_ts = now_ts
+                    state.chainlink_ticks_total += 1
+                    # If we have a market loaded but no target yet, set it now (this is sec~0).
+                    if state.market is not None and state.market.target_chainlink_at_open is None:
+                        state.market.target_chainlink_at_open = val
+                        csvs.event("TARGET_CHAINLINK_AT_OPEN",
+                                   f"slug={state.market.slug} target={val}")
+        except Exception as e:
+            state.reconnects_chainlink += 1
+            state.chainlink_status = "reconnecting"
+            state.last_error = f"chainlink: {type(e).__name__}: {e}"
+            csvs.event("CHAINLINK_RECONNECT", state.last_error)
+            await asyncio.sleep(2)
+
+
 async def poly_loop(state: RecorderState, csvs: CsvStore) -> None:
     last_sub_key = None
     while not state.should_stop:
@@ -841,17 +1017,26 @@ async def target_retry_loop(state: RecorderState, csvs: CsvStore) -> None:
 
 
 def log_market_outcome_if_ready(state: RecorderState, csvs: CsvStore, source: str = "rollover") -> None:
+    """Write market outcome row. Prefers Chainlink-based target+winner (canonical
+    Polymarket resolution source); falls back to Binance+target_price if Chainlink
+    isn't available."""
     m = state.market
-    if m is None or m.target_price is None or state.binance_price is None:
+    if m is None:
         return
+    # Prefer Chainlink for both target and final price (matches Polymarket's resolution).
+    target = m.target_chainlink_at_open if m.target_chainlink_at_open is not None else m.target_price
+    final_price = state.chainlink_price if state.chainlink_price is not None else state.binance_price
+    if target is None or final_price is None:
+        return
+    src_label = "chainlink" if (m.target_chainlink_at_open is not None and state.chainlink_price is not None) else "fallback_binance"
     try:
-        signed = float(state.binance_price) - float(m.target_price)
+        signed = float(final_price) - float(target)
         winner_side = "UP" if signed >= 0 else "DOWN"
         csvs.append_csv(csvs.paths["market_outcomes"], [
-            now_local(), m.slug, m.market_epoch, m.target_price, state.binance_price,
-            signed, abs(signed), winner_side, source,
+            now_local(), m.slug, m.market_epoch, target, final_price,
+            signed, abs(signed), winner_side, f"{source}/{src_label}",
         ])
-        csvs.event("MARKET_OUTCOME", f"slug={m.slug} winner={winner_side} final={state.binance_price} target={m.target_price} dist={signed:.2f}")
+        csvs.event("MARKET_OUTCOME", f"slug={m.slug} winner={winner_side} final={final_price} target={target} dist={signed:.2f} src={src_label}")
     except Exception as e:
         csvs.event("MARKET_OUTCOME_ERROR", f"{type(e).__name__}:{e}")
 
@@ -918,8 +1103,17 @@ async def target_retry_loop(state: RecorderState, csvs: CsvStore) -> None:
             if m.target_price is None and attempts_for_slug < 20:
                 attempts_for_slug += 1
                 state.target_attempts = attempts_for_slug
-                target = extract_target_from_html(m.url)
-                source = "html"
+                # PRIORITY 1: __NEXT_DATA__ (HTTP-only, fast, no browser).
+                # Polymarket changed Gamma — eventMetadata is now null for current
+                # markets; the priceToBeat is now in the page's __NEXT_DATA__ JSON.
+                target = await asyncio.to_thread(extract_target_from_next_data, m.url, m.slug)
+                source = "next_data" if target is not None else None
+                # PRIORITY 2: HTML regex fallback
+                if target is None:
+                    target = extract_target_from_html(m.url)
+                    if target is not None:
+                        source = "html"
+                # PRIORITY 3: Playwright (slow, last resort — may timeout under load)
                 if target is None:
                     rendered_target, err = await asyncio.to_thread(extract_target_from_rendered_page, m.url)
                     target = rendered_target
@@ -953,9 +1147,18 @@ async def combined_per_second_loop(state: RecorderState, csvs: CsvStore) -> None
                 m = state.market
                 signed = state.distance_signed()
                 abs_d = state.distance_abs()
+                # Chainlink-based distance (the canonical / authoritative one)
+                cl_age = (time.time() - state.chainlink_update_ts) if state.chainlink_update_ts > 0 else None
+                cl_target = m.target_chainlink_at_open if m else None
+                cl_signed = None
+                cl_abs = None
+                if state.chainlink_price is not None and cl_target is not None:
+                    cl_signed = float(state.chainlink_price) - float(cl_target)
+                    cl_abs = abs(cl_signed)
                 csvs.append_csv(csvs.paths["combined"], [
                     now_local(), sec, m.slug if m else "-", m.market_epoch if m else None, sec_from_start(m.market_epoch) if m else None,
                     state.binance_price, state.binance_age(), m.target_price if m else None, signed, abs_d,
+                    state.chainlink_price, cl_age, cl_target, cl_signed, cl_abs,
                     state.up.bid, state.up.ask, state.up.last, state.up.ask_qty_best, state.up.ask_usd_best,
                     state.up.qty_le_029, state.up.usd_le_029, state.up.qty_le_030, state.up.usd_le_030,
                     state.up.qty_le_031, state.up.usd_le_031, state.up.qty_le_032, state.up.usd_le_032,
@@ -965,7 +1168,7 @@ async def combined_per_second_loop(state: RecorderState, csvs: CsvStore) -> None
                     state.down.qty_le_031, state.down.usd_le_031, state.down.qty_le_032, state.down.usd_le_032,
                     state.down.qty_le_035, state.down.usd_le_035, state.side_age(state.down),
                     state.delta(1), state.delta(5), state.delta(10), state.delta(30), state.volatility_30s(),
-                    state.poly_updates_total, state.binance_ticks_total, m.url if m else "-",
+                    state.poly_updates_total, state.binance_ticks_total, state.chainlink_ticks_total, m.url if m else "-",
                 ])
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -1036,6 +1239,7 @@ async def async_main() -> None:
 
     tasks = [
         asyncio.create_task(binance_loop(state, csvs)),
+        asyncio.create_task(chainlink_loop(state, csvs)),
         asyncio.create_task(poly_loop(state, csvs)),
         asyncio.create_task(market_rollover_loop(state, csvs, initial_slug)),
         asyncio.create_task(target_retry_loop(state, csvs)),
@@ -1067,13 +1271,14 @@ def parse_args():
 
 
 def main() -> None:
-    global COIN, BINANCE_TICKER, BINANCE_WS, SLUG_PREFIX, DATA_DIR
+    global COIN, BINANCE_TICKER, BINANCE_WS, SLUG_PREFIX, DATA_DIR, CHAINLINK_SYMBOL
     args = parse_args()
     COIN = args.coin.upper()
     BINANCE_TICKER = (args.ticker or f"{COIN}USDT").upper()
     BINANCE_WS = f"wss://stream.binance.com:9443/ws/{BINANCE_TICKER.lower()}@trade"
     SLUG_PREFIX = args.slug_prefix or f"{COIN.lower()}-updown-5m-"
     DATA_DIR = args.data_dir or f"data_{COIN.lower()}_5m_research"
+    CHAINLINK_SYMBOL = COIN_TO_CHAINLINK_SYMBOL.get(COIN, f"{COIN.lower()}/usd")
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:

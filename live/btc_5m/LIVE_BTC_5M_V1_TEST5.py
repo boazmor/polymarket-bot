@@ -54,9 +54,9 @@ except Exception:
     async_playwright = None
 
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    from py_clob_client.clob_types import OrderArgs
+    from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import OrderArgsV2, OrderType, BalanceAllowanceParams, AssetType
+    POLYGON = 137
     HAS_CLOB = True
 except Exception:
     HAS_CLOB = False
@@ -107,12 +107,12 @@ BOT40_MAKER_LEVELS = [0.28, 0.29, 0.30]
 
 # Production size ג€” same for virtual (dry-run) testing and for live trading.
 # Virtual uses no real money so size is risk-free for testing.
-MAX_BUY_USD = 5.0       # TEST FILE — limited to $5/trade for first live verification
-BOT40_MAKER_SIZE_USD = 3.0   # TEST FILE      # 3 simultaneous orders -> $180 reserved in book; cap actual fills at MAX_BUY_USD
+MAX_BUY_USD = 1.0       # TEST FILE — $1/trade (Polymarket minimum) for max statistical samples
+BOT40_MAKER_SIZE_USD = 1.0   # TEST FILE      # $1 per maker order level (also Polymarket minimum)
 
 # Safety stops (enforced inside the bot, not just policy)
 MAX_DAILY_LOSS_USD = 15.0    # TEST FILE — tighter cap for testing        # bot kills itself after this much realized loss today
-MAX_WALLET_USD = 200.0           # bot refuses to trade if wallet balance > this
+MAX_WALLET_USD = 500.0           # bot refuses to trade if wallet balance > this
 
 # Modes
 DRY_RUN_DEFAULT = True           # default; --live flag plus confirmation flips it
@@ -288,6 +288,10 @@ class Wallet:
     """
 
     SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2  # discovered 2026-05-01 ג€” see memory
+    # Discovered 2026-05-02 — the Polymarket Safe (proxy) maker address.
+    # Found by querying /data/trades after a manual UI order. The EOA signs,
+    # the Safe is the maker. MUST be passed as funder= for V2 orders.
+    SAFE_ADDRESS = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
 
     def __init__(self, dry_run: bool, env_paths: Optional[List[str]] = None):
         self.dry_run = dry_run
@@ -298,7 +302,7 @@ class Wallet:
         self.private_key: Optional[str] = None
         self.address: Optional[str] = None
         self.rpc_url: Optional[str] = None
-        self.client = None  # py_clob_client.ClobClient instance once connected
+        self.client = None  # py_clob_client_v2.ClobClient instance once connected
         self.connected: bool = False
         self.last_error: str = ""
 
@@ -336,19 +340,19 @@ class Wallet:
         if not self._load_env():
             return False
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.constants import POLYGON
+            from py_clob_client_v2.client import ClobClient
         except Exception as e:
-            self.last_error = f"py-clob-client not installed: {e}"
+            self.last_error = f"py-clob-client-v2 not installed: {e}"
             return False
         try:
             self.client = ClobClient(
                 host="https://clob.polymarket.com",
                 key=self.private_key,
-                chain_id=POLYGON,
+                chain_id=137,
                 signature_type=self.SIGNATURE_TYPE_POLY_GNOSIS_SAFE,
+                funder=self.SAFE_ADDRESS,
             )
-            creds = self.client.create_or_derive_api_creds()
+            creds = self.client.create_or_derive_api_key()
             self.client.set_api_creds(creds)
             self.connected = True
             return True
@@ -358,12 +362,11 @@ class Wallet:
             return False
 
     def get_usdc_balance(self) -> Optional[float]:
-        """Return Polymarket USDC balance for the Gnosis Safe wallet, or None
+        """Return Polymarket USDC/pUSD balance for the Safe wallet, or None
         if dry-run / unable to query."""
         if self.dry_run or not self.connected or self.client is None:
             return None
         try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
                 signature_type=self.SIGNATURE_TYPE_POLY_GNOSIS_SAFE,
@@ -379,7 +382,7 @@ class Wallet:
             return None
 
     def place_buy(self, token_id: str, price: float, size_shares: float) -> Tuple[Optional[str], str]:
-        """Place a GTC limit BUY on the CLOB.
+        """Place a GTC limit BUY on the CLOB (V2).
         Returns (order_id, status). status is one of:
           'placed' / 'rejected:<reason>' / 'error:<reason>' / 'dry_run' / 'not_connected'
         """
@@ -388,15 +391,13 @@ class Wallet:
         if not self.connected or self.client is None:
             return (None, "not_connected")
         try:
-            from py_clob_client.clob_types import OrderArgs
-            args = OrderArgs(
+            args = OrderArgsV2(
                 price=round(float(price), 4),
                 size=round(float(size_shares), 4),
                 side="BUY",
                 token_id=str(token_id),
             )
-            signed = self.client.create_order(args)
-            resp = self.client.post_order(signed)
+            resp = self.client.create_and_post_order(args, order_type=OrderType.GTC)
             if isinstance(resp, dict):
                 if resp.get("success") or resp.get("orderID") or resp.get("orderId"):
                     oid = str(resp.get("orderID") or resp.get("orderId") or "?")
@@ -412,7 +413,13 @@ class Wallet:
         if self.dry_run or not self.connected or self.client is None:
             return True
         try:
-            self.client.cancel(order_id=order_id)
+            r = self.client.cancel_orders([str(order_id)])
+            if isinstance(r, dict):
+                canceled = r.get("canceled", []) or []
+                if str(order_id) in canceled:
+                    return True
+                self.last_error = f"cancel failed: {r}"
+                return False
             return True
         except Exception as e:
             self.last_error = f"cancel failed: {type(e).__name__}: {e}"
@@ -422,7 +429,10 @@ class Wallet:
         if self.dry_run or not self.connected or self.client is None:
             return []
         try:
-            return self.client.get_orders() or []
+            r = self.client.get_open_orders()
+            if isinstance(r, dict):
+                return r.get("data", []) or []
+            return r or []
         except Exception as e:
             self.last_error = f"fetch_orders failed: {type(e).__name__}: {e}"
             return []
@@ -1496,9 +1506,11 @@ class Polymarket5mDualBot:
             # Compute order parameters: place at price_limit for spend_cap dollars.
             order_price = round(min(price_limit, 0.99), 4)  # never above 0.99
             order_shares = round(spend_cap / order_price, 4)
-            if order_shares < 5.0:  # Polymarket CLOB minimum is ~5 shares
+            # Polymarket actual minimum is $1 nominal value (not 5 shares).
+            order_notional = order_shares * order_price
+            if order_notional < 1.0:
                 bot.last_decision = "WAIT"
-                bot.last_note = f"order size {order_shares:.2f} below minimum (5)"
+                bot.last_note = f"order ${order_notional:.2f} below Polymarket $1 minimum"
                 return
             token_id = self.current.get("yes_token") if side == "UP" else self.current.get("no_token")
             if not token_id:
