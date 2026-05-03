@@ -61,21 +61,25 @@ try:
 except Exception:
     HAS_CLOB = False
 
-GAMMA_MARKETS_BY_SLUG = "https://gamma-api.polymarket.com/markets"
-POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
-CLOB_HOST = "https://clob.polymarket.com"
-POLYGON_CHAIN_ID = 137
+# All tunable constants live in bot_config.py (Task #13 stage 1, 2026-05-02).
+# Adjust strategy / safety / timing there — this file should not be edited
+# during normal tuning.
+from bot_config import (
+    GAMMA_MARKETS_BY_SLUG, POLY_WS_URL, BINANCE_WS_URL, CLOB_HOST, POLYGON_CHAIN_ID,
+    HEARTBEAT_EVERY_SEC, STALE_AFTER_SEC, SCREEN_REFRESH_EVERY_SEC,
+    BOT40_MAX_SEC, BOT120_MIN_SEC, BOT120_MAX_SEC,
+    RENDER_RETRY_WINDOW_SEC, RENDER_RETRY_INTERVAL_SEC,
+    ENTRY_THRESHOLD, DATA_DIR,
+    BOT40_MAKER_LEVELS, BOT40_LIMIT_END_SEC, BOT40_FALLBACK_PRICE, BOT40_FLOW_DIST_THRESHOLD,
+    BOT40_RESEARCH_PRICE_LEVELS, BOT40_RESEARCH_SECONDS,
+    MIN_DIST_BOT120, BOT120_MAX_PRICE, BOT120_LIMIT_PRICE,
+    BOT120_RESEARCH_SECONDS, BOT120_RESEARCH_DISTANCE_LEVELS,
+    MAX_BUY_USD, BOT40_MAKER_SIZE_USD, MAX_DAILY_LOSS_USD, MAX_WALLET_USD,
+    DRY_RUN_DEFAULT,
+    SIGNATURE_TYPE_POLY_GNOSIS_SAFE, SAFE_ADDRESS,
+)
 
-HEARTBEAT_EVERY_SEC = 10
-STALE_AFTER_SEC = 20
-SCREEN_REFRESH_EVERY_SEC = 2   # CHANGED 02/05 — bumped from 1 to 2 to reduce flicker on PowerShell
-BOT40_MAX_SEC = 40
-BOT120_MIN_SEC = 0           # CHANGED FROM V3 (was 41) ג€” V4-style, full window
-BOT120_MAX_SEC = 120
-ENTRY_THRESHOLD = 0.35
-DATA_DIR = "data_live_btc_5m_v1"
-
+# ANSI escape codes — display formatting, not user-tunable, kept inline.
 ANSI_RESET = "\033[0m"
 ANSI_RED = "\033[31m"
 ANSI_GREEN = "\033[32m"
@@ -85,38 +89,6 @@ ANSI_CYAN = "\033[36m"
 ANSI_WHITE = "\033[37m"
 ANSI_DIM = "\033[2m"
 ANSI_BLINK = "\033[5m"
-MIN_DIST_BOT120 = 60.0           # CHANGED 02/05 evening — user lowered from 68 to 60
-BOT40_LIMIT_END_SEC = 30
-BOT40_FALLBACK_PRICE = 0.35
-BOT120_MAX_PRICE = 0.80          # legacy — no longer used in maker-style BOT120
-BOT120_LIMIT_PRICE = 0.50        # NEW 02/05 — BOT120 now places LIMIT order at 0.50 (maker pattern)
-RENDER_RETRY_WINDOW_SEC = 20
-RENDER_RETRY_INTERVAL_SEC = 2
-BOT40_FLOW_DIST_THRESHOLD = 25.0
-BOT40_RESEARCH_PRICE_LEVELS = [round(x / 100.0, 2) for x in range(28, 43)]
-BOT40_RESEARCH_SECONDS = list(range(32, 43))
-BOT120_RESEARCH_SECONDS = [55, 57, 59, 62, 64]
-BOT120_RESEARCH_DISTANCE_LEVELS = [55.0, 57.0, 59.0, 62.0, 64.0]
-
-# ============================================================================
-# LIVE TRADING ג€” strategy and safety constants
-# ============================================================================
-# Maker model: BOT40 phase 1 places THREE simultaneous limit orders at these
-# price levels.  Each level gets BOT40_MAKER_SIZE_USD of capital reserved.
-# Total in book = 3 * BOT40_MAKER_SIZE_USD.  Cap on actual fills = MAX_BUY_USD.
-BOT40_MAKER_LEVELS = [0.28, 0.29, 0.30]
-
-# Production size ג€” same for virtual (dry-run) testing and for live trading.
-# Virtual uses no real money so size is risk-free for testing.
-MAX_BUY_USD = 1.0       # TEST FILE — $1/trade (Polymarket minimum) for max statistical samples
-BOT40_MAKER_SIZE_USD = 1.0   # TEST FILE      # $1 per maker order level (also Polymarket minimum)
-
-# Safety stops (enforced inside the bot, not just policy)
-MAX_DAILY_LOSS_USD = 50.0    # TEST FILE — effectively disabled for $1 trades. Re-tighten when scaling up.
-MAX_WALLET_USD = 500.0           # bot refuses to trade if wallet balance > this
-
-# Modes
-DRY_RUN_DEFAULT = True           # default; --live flag plus confirmation flips it
 
 
 def color_text(txt: str, color: Optional[str]) -> str:
@@ -288,11 +260,10 @@ class Wallet:
     and balance returns None ג€” the bot's V3 simulation logic kicks in instead.
     """
 
-    SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2  # discovered 2026-05-01 ג€” see memory
-    # Discovered 2026-05-02 — the Polymarket Safe (proxy) maker address.
-    # Found by querying /data/trades after a manual UI order. The EOA signs,
-    # the Safe is the maker. MUST be passed as funder= for V2 orders.
-    SAFE_ADDRESS = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
+    # Mirrored from bot_config so existing self.SIGNATURE_TYPE.. / self.SAFE_ADDRESS
+    # references keep working. Edit values in bot_config.py, not here.
+    SIGNATURE_TYPE_POLY_GNOSIS_SAFE = SIGNATURE_TYPE_POLY_GNOSIS_SAFE
+    SAFE_ADDRESS = SAFE_ADDRESS
 
     def __init__(self, dry_run: bool, env_paths: Optional[List[str]] = None):
         self.dry_run = dry_run
