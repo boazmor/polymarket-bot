@@ -65,11 +65,11 @@ If unified ≤ isolated → simplify to 7 separate bots.
 
 | Stage | Work | Hours |
 |---|---|---|
-| 1 | Externalize all hardcoded constants → `bot_config.py` (params file). Bot keeps working as-is, just reads from external file. | 1-2h |
-| 2 | Split BOT40 into BOT_30 + BOT_40 (pure refactor, no logic change) | 2-3h |
-| 3 | Extract each component into its own file under `bot_engine/` (binance.py, wallet.py, strategy.py, screen.py, reports.py, master.py) | 5-7h |
-| 4 | Multi-coin: master controller orchestrates 7 strategy instances, shared wallet, shared capital allocator | 3-4h |
-| 5 | (Optional, gated on report) Cross-Coin Signal Engine added between strategy and decision | 4-5h |
+| 1 | Externalize all hardcoded constants → `bot_config.py` (params file). Bot keeps working as-is, just reads from external file. **DONE 2026-05-02 — `live/btc_5m/bot_config.py` created with 33 tunable constants; main file imports from it; smoke-tested (compile + --help OK).** | 1-2h |
+| 2 | Split BOT40 into BOT_30 + BOT_40 (pure refactor, no logic change). **DONE 2026-05-02 — `bot_engine/strategy.py` exposes `bot_30_choose_side()` (sec 0-30 maker) and `bot_40_choose_side()` (sec 31-40 taker fallback). Both share one BotState named "BOT40" so `MAX_BUY_USD` cap accumulates across phases (preserves original behavior + CSV schema).** | 2-3h |
+| 3 | Extract each component into its own file under `bot_engine/` (binance.py, wallet.py, strategy.py, screen.py, reports.py, master.py). **DONE 2026-05-02 — all 7 modules created: state, binance (per-symbol), wallet (shared), reports (per-coin data_dir), screen, market_manager, strategy. Each smoke-tested individually.** | 5-7h |
+| 4 | Multi-coin: master controller orchestrates 7 strategy instances, shared wallet, shared capital allocator. **DONE 2026-05-02 — `bot_engine/master.py` + `LIVE_MULTI_COIN_V1.py` entry point. Master spawns N CoinRuntimes (binance+market+strategy each) sharing one Wallet; one asyncio task per coin per WS feed; combined render loop. PARKED — only BTC enabled in COIN_PARAMS.** | 3-4h |
+| 5 | (Optional, gated on report) Cross-Coin Signal Engine added between strategy and decision. **NOT STARTED — gated on multi-coin recordings analysis per user instruction.** | 4-5h |
 
 **User's preferred path**: stages 1-4 first to get a clean multi-coin baseline. Stage 5 (cross-coin engine) added LATER if the comparative report shows it's worth the complexity.
 
