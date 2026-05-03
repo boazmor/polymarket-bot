@@ -1378,7 +1378,7 @@ class Polymarket5mDualBot:
                 distance=distance,
             )
 
-    def _try_execute_bot_buy(self, bot: BotState, sec: int, side: Optional[str]) -> None:
+    async def _try_execute_bot_buy(self, bot: BotState, sec: int, side: Optional[str]) -> None:
         btc, target, distance = self._distance_fields()
 
         if bot is self.bot120:
@@ -1497,7 +1497,7 @@ class Polymarket5mDualBot:
                 bot.last_decision = "WAIT"
                 bot.last_note = f"{side} token_id missing ג€” cannot place live order"
                 return
-            order_id, status = self.wallet.place_buy(str(token_id), order_price, order_shares)
+            order_id, status = await asyncio.to_thread(self.wallet.place_buy, str(token_id), order_price, order_shares)
             if not order_id or not status.startswith(("placed", "dry_run")):
                 bot.last_decision = "REJECTED"
                 bot.last_note = f"live order rejected: {status}"
@@ -1912,14 +1912,14 @@ class Polymarket5mDualBot:
                                 self._record_signals_for_second(sec)
                                 bot40_side = self._choose_bot40_side(sec)
                                 if bot40_side is not None:
-                                    self._try_execute_bot_buy(self.bot40, sec, bot40_side)
+                                    await self._try_execute_bot_buy(self.bot40, sec, bot40_side)
                                 else:
-                                    self._try_execute_bot_buy(self.bot40, sec, None)
+                                    await self._try_execute_bot_buy(self.bot40, sec, None)
                                 bot120_side = self._choose_bot120_side(sec)
                                 if bot120_side is not None:
-                                    self._try_execute_bot_buy(self.bot120, sec, bot120_side)
+                                    await self._try_execute_bot_buy(self.bot120, sec, bot120_side)
                                 else:
-                                    self._try_execute_bot_buy(self.bot120, sec, None)
+                                    await self._try_execute_bot_buy(self.bot120, sec, None)
                             if time.time() - last_print >= SCREEN_REFRESH_EVERY_SEC:
                                 last_print = time.time()
                                 self.print_status()

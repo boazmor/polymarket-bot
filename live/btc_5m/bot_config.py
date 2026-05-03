@@ -79,8 +79,8 @@ BOT120_RESEARCH_DISTANCE_LEVELS = [55.0, 57.0, 59.0, 62.0, 64.0]
 # ============================================================================
 # Production size — same for virtual (dry-run) testing and for live trading.
 # Virtual uses no real money so size is risk-free for testing.
-MAX_BUY_USD = 1.0       # TEST FILE — $1/trade (Polymarket minimum) for max statistical samples
-BOT40_MAKER_SIZE_USD = 1.0   # TEST FILE      # $1 per maker order level (also Polymarket minimum)
+MAX_BUY_USD = 2.0       # TEST FILE — $2/trade (was $1; floating-point made $1 fail Polymarket > $1 minimum)
+BOT40_MAKER_SIZE_USD = 2.0   # TEST FILE      # $2 per maker order level (was $1; same float issue)
 
 # Safety stops (enforced inside the bot, not just policy)
 MAX_DAILY_LOSS_USD = 50.0    # TEST FILE — effectively disabled for $1 trades. Re-tighten when scaling up.
