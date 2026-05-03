@@ -150,6 +150,7 @@ class BotState:
     buy_done_for_market: bool = False
     pending_limit_order_id: Optional[str] = None
     pending_limit_side: Optional[str] = None
+    limit_attempt_done: bool = False
     extra_market_buy_done: bool = False
     extra_market_spent: float = 0.0
     executed_virtual_sec_side: set = field(default_factory=set)
@@ -174,6 +175,7 @@ class BotState:
         self.buy_done_for_market = False
         self.pending_limit_order_id = None
         self.pending_limit_side = None
+        self.limit_attempt_done = False
         self.extra_market_buy_done = False
         self.extra_market_spent = 0.0
         self.executed_virtual_sec_side = set()
@@ -1416,6 +1418,11 @@ class Polymarket5mDualBot:
                 bot.last_decision = "WAIT"
                 bot.last_note = f"dist<{MIN_DIST_BOT120:.0f}"
                 return
+            # Prevent retry-storm: if we already tried the LIMIT @ 0.50 (success or fail), don't retry
+            if bot.limit_attempt_done:
+                bot.last_decision = "WAIT"
+                bot.last_note = "limit attempt already done this market"
+                return
 
         if not (bot.start_sec <= sec <= bot.end_sec):
             bot.last_decision = "WAIT"
@@ -1524,6 +1531,9 @@ class Polymarket5mDualBot:
                 bot.last_note = f"{side} token_id missing ג€” cannot place live order"
                 return
             order_id, status = await asyncio.to_thread(self.wallet.place_buy, str(token_id), order_price, order_shares)
+            # For BOT120 LIMIT mode, mark attempt as done regardless of outcome — prevents per-second retry storm
+            if bot is self.bot120 and mode == "LIMIT_050":
+                bot.limit_attempt_done = True
             if not order_id or not status.startswith(("placed", "dry_run")):
                 bot.last_decision = "REJECTED"
                 bot.last_note = f"live order rejected: {status}"
@@ -1650,6 +1660,8 @@ class Polymarket5mDualBot:
             token_id = self.current.get("yes_token") if side == "UP" else self.current.get("no_token")
             if not token_id: return
             order_id, status = await asyncio.to_thread(self.wallet.place_buy, str(token_id), order_price, order_shares)
+            # Mark attempt done regardless of outcome — prevents per-second retry storm
+            bot.extra_market_buy_done = True
             if not order_id or not status.startswith(("placed", "dry_run")):
                 self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_REJECTED",
                                        f"side={side} price={order_price} size={order_shares} status={status} mode=MARKET_DIST68")
