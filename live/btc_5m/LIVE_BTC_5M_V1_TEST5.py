@@ -73,6 +73,7 @@ from bot_config import (
     BOT40_MAKER_LEVELS, BOT40_LIMIT_END_SEC, BOT40_FALLBACK_PRICE, BOT40_FLOW_DIST_THRESHOLD,
     BOT40_RESEARCH_PRICE_LEVELS, BOT40_RESEARCH_SECONDS,
     MIN_DIST_BOT120, BOT120_MAX_PRICE, BOT120_LIMIT_PRICE,
+    BOT120_MARKET_BUY_DIST, BOT120_MARKET_MAX_PRICE,
     BOT120_RESEARCH_SECONDS, BOT120_RESEARCH_DISTANCE_LEVELS,
     MAX_BUY_USD, BOT40_MAKER_SIZE_USD, MAX_DAILY_LOSS_USD, MAX_WALLET_USD,
     DRY_RUN_DEFAULT,
@@ -147,6 +148,10 @@ class BotState:
     current_market_spent: float = 0.0
     last_buy: Optional[dict] = None
     buy_done_for_market: bool = False
+    pending_limit_order_id: Optional[str] = None
+    pending_limit_side: Optional[str] = None
+    extra_market_buy_done: bool = False
+    extra_market_spent: float = 0.0
     executed_virtual_sec_side: set = field(default_factory=set)
     last_logged_sec_side: set = field(default_factory=set)
     last_decision: str = "NONE"
@@ -167,6 +172,10 @@ class BotState:
         self.current_market_spent = 0.0
         self.last_buy = None
         self.buy_done_for_market = False
+        self.pending_limit_order_id = None
+        self.pending_limit_side = None
+        self.extra_market_buy_done = False
+        self.extra_market_spent = 0.0
         self.executed_virtual_sec_side = set()
         self.last_logged_sec_side = set()
         self.last_decision = "NONE"
@@ -1386,7 +1395,24 @@ class Polymarket5mDualBot:
                 bot.last_decision = "WAIT"
                 bot.last_note = "missing poly target"
                 return
-            if abs(distance) < MIN_DIST_BOT120:
+            abs_dist = abs(distance)
+            # CANCEL active limit if distance dropped back below threshold
+            if abs_dist < MIN_DIST_BOT120 and bot.pending_limit_order_id is not None:
+                if not self.dry_run and self.wallet is not None:
+                    try:
+                        ok = await asyncio.to_thread(self.wallet.cancel, bot.pending_limit_order_id)
+                    except Exception as e:
+                        ok = False
+                    self.logger.log_event(
+                        self.current.get("slug") or "-", "LIMIT_CANCELLED",
+                        f"oid={bot.pending_limit_order_id} dist={abs_dist:.1f} ok={ok}"
+                    )
+                bot.pending_limit_order_id = None
+                bot.pending_limit_side = None
+            # Try MARKET buy at dist >= 68 (independent of limit path)
+            if abs_dist >= BOT120_MARKET_BUY_DIST and not bot.extra_market_buy_done:
+                await self._try_execute_bot120_market(bot, sec, side, btc, target, distance)
+            if abs_dist < MIN_DIST_BOT120:
                 bot.last_decision = "WAIT"
                 bot.last_note = f"dist<{MIN_DIST_BOT120:.0f}"
                 return
@@ -1511,8 +1537,12 @@ class Polymarket5mDualBot:
             avg_fill = order_price
             live_order_id = order_id
             self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_PLACED",
-                                   f"side={side} order_id={order_id} price={order_price} size={order_shares}")
+                                   f"side={side} order_id={order_id} price={order_price} size={order_shares} mode={mode}")
             print(f"{ANSI_GREEN}[LIVE] {bot.name} BUY {side} @{order_price:.4f} x{order_shares:.2f} (${spent:.2f}) order_id={order_id}{ANSI_RESET}")
+            # Track pending limit (so we can cancel if dist drops). Only for the maker @ 0.50 path.
+            if bot is self.bot120 and mode == "LIMIT_050":
+                bot.pending_limit_order_id = order_id
+                bot.pending_limit_side = side
 
         entry_flow_side = self._flow_side_from_distance(distance)
         entry_with_flow = int(side == entry_flow_side) if entry_flow_side is not None else None
@@ -1579,6 +1609,73 @@ class Polymarket5mDualBot:
             fallback_fill_price=fallback_fill_price,
             note=bot.last_note,
         )
+
+    async def _try_execute_bot120_market(self, bot: BotState, sec: int, side: Optional[str],
+                                          btc: Optional[float], target: Optional[float],
+                                          distance: Optional[float]) -> None:
+        """BOT120 secondary path: MARKET BUY when distance >= BOT120_MARKET_BUY_DIST.
+        Independent of the LIMIT @ 0.50 path. Has its own $MAX_BUY_USD budget."""
+        if side is None:
+            return
+        if not (bot.start_sec <= sec <= bot.end_sec):
+            return
+        if bot.extra_market_buy_done:
+            return
+        if bot.extra_market_spent >= MAX_BUY_USD - 1e-9:
+            bot.extra_market_buy_done = True
+            return
+        best_ask = self.prices[side]["best_ask"]
+        if best_ask is None or best_ask > BOT120_MARKET_MAX_PRICE:
+            return
+        avail_qty, avail_notional = self._qty_notional_le(side, BOT120_MARKET_MAX_PRICE)
+        remaining_cap = max(0.0, MAX_BUY_USD - bot.extra_market_spent)
+        spend_cap = min(remaining_cap, avail_notional or 0.0)
+        if spend_cap <= 0:
+            return
+        if self.dry_run:
+            spent, filled_qty, avg_fill = self._simulate_fill_up_to_cap(side, spend_cap, BOT120_MARKET_MAX_PRICE)
+            if spent <= 0 or filled_qty <= 0 or avg_fill is None:
+                return
+            live_order_id = None
+        else:
+            if self._check_and_update_daily_kill(): return
+            if self.wallet is None or not self.wallet.connected: return
+            bal = self.wallet.get_usdc_balance()
+            if bal is not None and bal > MAX_WALLET_USD: return
+            order_price = round(min(best_ask, 0.99), 4)
+            order_shares = round(spend_cap / order_price, 4)
+            order_notional = order_shares * order_price
+            if order_notional < 1.0:
+                return
+            token_id = self.current.get("yes_token") if side == "UP" else self.current.get("no_token")
+            if not token_id: return
+            order_id, status = await asyncio.to_thread(self.wallet.place_buy, str(token_id), order_price, order_shares)
+            if not order_id or not status.startswith(("placed", "dry_run")):
+                self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_REJECTED",
+                                       f"side={side} price={order_price} size={order_shares} status={status} mode=MARKET_DIST68")
+                return
+            spent = round(order_shares * order_price, 6)
+            filled_qty = order_shares
+            avg_fill = order_price
+            live_order_id = order_id
+            self.logger.log_event(self.current.get("slug") or "-", "LIVE_ORDER_PLACED",
+                                   f"side={side} order_id={order_id} price={order_price} size={order_shares} mode=MARKET_DIST68")
+            print(f"{ANSI_GREEN}[LIVE] {bot.name} EXTRA-MARKET BUY {side} @{order_price:.4f} x{order_shares:.2f} (${spent:.2f}) order_id={order_id}{ANSI_RESET}")
+        # Record position alongside any existing limit position
+        entry_flow_side = self._flow_side_from_distance(distance)
+        entry_with_flow = int(side == entry_flow_side) if entry_flow_side is not None else None
+        pos = VirtualPosition(
+            sec=sec, side=side, spent=spent, qty=filled_qty, avg_fill=avg_fill,
+            entry_best_ask=best_ask, entry_best_bid=self.prices[side]["best_bid"],
+            entry_btc_price=btc, entry_target_price=target, entry_distance=distance,
+            entry_flow_side=entry_flow_side, entry_with_flow=entry_with_flow,
+            entry_ts=DualResearchLogger._ts(),
+        )
+        bot.positions[side].append(pos)
+        bot.extra_market_spent += spent
+        bot.extra_market_buy_done = bot.extra_market_spent >= MAX_BUY_USD - 1e-9
+        bot.last_decision = f"BUY {side}"
+        bot.last_note = f"MARKET_DIST68 {side} sec={sec} spent=${spent:.2f}"
 
     def _position_mark(self, bot: BotState, side: str) -> Tuple[float, float, Optional[float], Optional[float]]:
         positions = bot.positions[side]
@@ -1736,6 +1833,14 @@ class Polymarket5mDualBot:
     async def move_to_next_market(self) -> None:
         old_slug = self.current["slug"]
         old_suffix = self.current["current_suffix"]
+        # Cancel any leftover bot120 limit order before market closes
+        if self.bot120.pending_limit_order_id is not None and not self.dry_run and self.wallet is not None:
+            try:
+                ok = await asyncio.to_thread(self.wallet.cancel, self.bot120.pending_limit_order_id)
+            except Exception:
+                ok = False
+            self.logger.log_event(old_slug or "-", "LIMIT_CANCELLED_ROLLOVER",
+                                  f"oid={self.bot120.pending_limit_order_id} ok={ok}")
         self._settle_bot_positions(self.bot40)
         self._settle_bot_positions(self.bot120)
         self.current["current_suffix"] = int(self.current["current_suffix"]) + 300

@@ -66,9 +66,11 @@ BOT40_RESEARCH_SECONDS = list(range(32, 43))
 # ============================================================================
 # BOT120 strategy params
 # ============================================================================
-MIN_DIST_BOT120 = 60.0           # CHANGED 02/05 evening — user lowered from 68 to 60
-BOT120_MAX_PRICE = 0.80          # legacy — no longer used in maker-style BOT120
-BOT120_LIMIT_PRICE = 0.50        # NEW 02/05 — BOT120 now places LIMIT order at 0.50 (maker pattern)
+MIN_DIST_BOT120 = 60.0           # threshold to PLACE limit @ 0.50 maker order
+BOT120_LIMIT_PRICE = 0.50        # limit order price for the maker buy
+BOT120_MARKET_BUY_DIST = 68.0    # NEW 03/05 — additional MARKET buy when distance hits this
+BOT120_MARKET_MAX_PRICE = 0.80   # NEW 03/05 — market buy fires only if ask <= this
+BOT120_MAX_PRICE = 0.80          # legacy — kept for backwards compat in print_status
 
 # BOT120 research-only grid
 BOT120_RESEARCH_SECONDS = [55, 57, 59, 62, 64]
