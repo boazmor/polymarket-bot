@@ -38,6 +38,41 @@ User-led brainstorm 04/05/2026 evening. Goal: divide the 300-second 5-min market
 - Bet: panic seller will dump cheap, our limit catches it; if BTC swings → 100x payout
 - Per user: "אפשר לשים לימיט 0.01 ויהיה מי שימכור במרקט"
 
+## ⭐ TOP PRIORITY: BOT_PASSIVE_LOTTERY (added 04/05 evening)
+
+User insight: Popular-Insurrection's strategy is **passive limit @ 0.01 placed at market open**, NOT timed action. He plants the order at sec 0-5, waits the entire 5 minutes for a panic-seller to dump cheap onto his limit.
+
+**Why this works:**
+- Cost = $0 if not filled (limit didn't match → cancelled at rollover)
+- Cost = $1 if filled (Polymarket minimum)
+- Win payout when right = $100 (1/0.01 = 100x)
+- Empirically (49-market sample): 0.01 ASK appears in ~3% of markets, when prior distance was ≥30 same direction.
+- Of fills, ~32% win (second reversal happens) → expected return per fill ≈ +3000%
+
+**Implementation spec:**
+- At sec 0-5 of every new 5-min market: place 2 limit BUY orders
+  - UP token at 0.01, size 100 shares ($1)
+  - DOWN token at 0.01, size 100 shares ($1)
+- Order type: GTC limit (sit until filled or cancelled)
+- At rollover: cancel any unfilled limits
+- If filled: position recorded, settles automatically at market resolution
+- Total capital tied up per market: $2 max (and only when filled)
+
+**Theoretical scale (assuming numbers hold):**
+- 288 markets/day × 30 days = 8,640 markets/month per coin
+- 3% fill rate × 2 sides = 6% × 8640 = ~518 fills/month
+- 32% win × 518 = 166 wins × $99 profit = $16,434
+- Minus 352 losses × $1 = $352
+- Net: ~$16,000/month per coin (theoretical, before market reaction to multiple bots doing this)
+
+**Risks:**
+- Tiny sample (31 opportunities, 1 with 0.01 fill) — actual fill rate could be much lower
+- Other bots doing the same compete for the same liquidity
+- Polymarket might add minimum-trade-size enforcement
+- Sudden market freeze prevents cancellation
+
+**This is the PRIMARY strategy to validate and build first. Higher priority than Stage 4/5a above.**
+
 ## Validation Required (before building any new module)
 
 1. **Stage 4** — query recordings: of markets where dist ≥ +50 occurred in sec 120-200, what % of the same direction WON the final outcome? Need ≥ 50 markets sample.
