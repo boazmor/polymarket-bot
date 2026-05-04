@@ -67,7 +67,7 @@ BOT40_RESEARCH_SECONDS = list(range(32, 43))
 # BOT120 strategy params
 # ============================================================================
 MIN_DIST_BOT120 = 60.0           # threshold to PLACE limit @ 0.50 maker order
-BOT120_LIMIT_PRICE = 0.50        # limit order price for the maker buy
+BOT120_LIMIT_PRICE = 0.65        # limit order price for the maker buy (raised from 0.50 — analysis showed catching ~85 trades vs 2)
 BOT120_MARKET_BUY_DIST = 68.0    # NEW 03/05 — additional MARKET buy when distance hits this
 BOT120_MARKET_MAX_PRICE = 0.80   # NEW 03/05 — market buy fires only if ask <= this
 BOT120_MAX_PRICE = 0.80          # legacy — kept for backwards compat in print_status
@@ -138,7 +138,7 @@ COIN_PARAMS = {
         "bot30_maker_levels": [0.28, 0.29, 0.30],
         "bot40_fallback_price": 0.35,
         "bot120_min_distance": 60.0,
-        "bot120_limit_price": 0.50,
+        "bot120_limit_price": 0.65,
         "max_buy_usd": 1.0,
         "bot40_maker_size_usd": 1.0,
         "max_daily_loss_usd": 50.0,
