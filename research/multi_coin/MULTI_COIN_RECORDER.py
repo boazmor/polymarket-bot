@@ -723,7 +723,10 @@ def fetch_market_info_for_slug(slug: str) -> MarketInfo:
     if (not up_token or not down_token) and len(token_ids) >= 2:
         up_token = up_token or str(token_ids[0])
         down_token = down_token or str(token_ids[1])
-    suffix = int(re.search(r"(\d+)$", slug).group(1))
+    # Slug suffix: epoch-style slugs end in digits (5m/15m/4h),
+    # calendar-style slugs (1h/1d) don't — fall back to current window epoch.
+    m_suf = re.search(r"(\d+)$", slug)
+    suffix = int(m_suf.group(1)) if m_suf else floor_to_window_epoch()
     url = event_url_from_slug(slug)
     target = parse_target_from_market_obj(m0, question)
     if target is None:
