@@ -73,6 +73,22 @@ User insight: Popular-Insurrection's strategy is **passive limit @ 0.01 placed a
 
 **This is the PRIMARY strategy to validate and build first. Higher priority than Stage 4/5a above.**
 
+## ⚠️ Open question to verify when building BRM
+
+Conflicting signals in 59-market sample at price ≤ 0.01:
+- Early fills (sec 60-240, n=13): 0 wins
+- Late fills (sec 240-300, n=41): 5 wins (12%)
+
+User's logic argues the OPPOSITE should be true: early fill = more time remaining for second reversal = higher win rate. Late fill = less time = lower win rate.
+
+The data could be a sample artifact. Possible alternative explanation (selection bias):
+- Markets that drop to 0.01 EARLY are strong-trend markets that don't reverse
+- Markets that drop to 0.01 LATE are balanced markets where late "twitches" can flip outcome
+
+**Decision deferred:** When we build BRM, re-run this analysis on a much larger sample (≥1000 markets, ≥1 week of data). Compare early vs late fill win rates. If late > early holds → restrict limit to last minute only. If user's logic was right → place limit from sec 0.
+
+Either way, the design choice (place at sec 0 vs only after sec 240) materially affects strategy efficiency.
+
 ## Validation Required (before building any new module)
 
 1. **Stage 4** — query recordings: of markets where dist ≥ +50 occurred in sec 120-200, what % of the same direction WON the final outcome? Need ≥ 50 markets sample.
