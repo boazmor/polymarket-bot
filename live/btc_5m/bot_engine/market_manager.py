@@ -317,6 +317,15 @@ class MarketManager:
             return line_target, "line", event_meta_target, line_target, strike_target, question_target, None
         if strike_target is not None:
             return strike_target, "strikePrice", event_meta_target, line_target, strike_target, question_target, None
+
+        next_data_target, next_data_src = self.extract_target_from_next_data(url, slug)
+        if next_data_target is not None:
+            try:
+                self.log_event(slug, "TARGET_FROM_NEXT_DATA", f"target_price={next_data_target:.2f} | source={next_data_src}")
+            except Exception:
+                pass
+            return next_data_target, next_data_src, event_meta_target, line_target, strike_target, question_target, next_data_target
+
         if question_target is not None:
             return question_target, "question", event_meta_target, line_target, strike_target, question_target, None
 
@@ -434,6 +443,9 @@ class MarketManager:
         self.kickoff_render_target()
 
     def resolve_target_in_use(self) -> Tuple[Optional[float], Optional[str]]:
+        # Playwright path retained as fallback only (currently disabled).
+        # Primary sources are Polymarket-structured: eventMetadata, line, strike,
+        # next_data JSON. Question-text regex is last because it's only the rounded threshold.
         target = self.current.get("target_rendered_page")
         if target is not None:
             return target, "rendered_page"
@@ -449,11 +461,10 @@ class MarketManager:
         return None, None
 
     def kickoff_render_target(self) -> None:
-        if self.current.get("target_rendered_page") is not None:
-            return
-        if self._render_task is not None and not self._render_task.done():
-            return
-        self._render_task = asyncio.create_task(self.capture_rendered_page_target())
+        # Playwright disabled (2026-05-04) — was causing EPIPE crashes under
+        # server load. Target now comes from next_data (Polymarket __NEXT_DATA__
+        # JSON) and other browser-free sources in ensure_target_price.
+        return
 
     async def load_initial_market_from_url(self, url: str) -> None:
         slug, prefix, suffix = self.parse_initial_url(url)
