@@ -62,22 +62,6 @@ COIN: str = "BTC"
 BINANCE_TICKER: str = "BTCUSDT"
 SLUG_PREFIX: str = "btc-updown-5m-"
 
-# Multi-window configuration. WINDOW set by main() based on --window CLI arg.
-# Supported values: "5m", "15m", "1h", "4h", "1d"
-WINDOW: str = "5m"
-
-# Per-window: step in seconds + slug pattern type ("epoch" or "calendar_h" or "calendar_d")
-WINDOW_CONFIG = {
-    "5m":  {"step": 300,    "pattern": "epoch",      "name_style": "short"},
-    "15m": {"step": 900,    "pattern": "epoch",      "name_style": "short"},
-    "4h":  {"step": 14400,  "pattern": "epoch",      "name_style": "short"},
-    "1h":  {"step": 3600,   "pattern": "calendar_h", "name_style": "long"},
-    "1d":  {"step": 86400,  "pattern": "calendar_d", "name_style": "long"},
-}
-
-COIN_SHORT_NAMES = {"BTC":"btc", "ETH":"eth", "SOL":"sol", "XRP":"xrp", "DOGE":"doge", "BNB":"bnb", "HYPE":"hype"}
-COIN_LONG_NAMES  = {"BTC":"bitcoin", "ETH":"ethereum", "SOL":"solana", "XRP":"xrp", "DOGE":"dogecoin", "BNB":"bnb", "HYPE":"hype"}
-
 # Polymarket's own Chainlink RTDS WebSocket — same source they use for market resolution.
 # The price at sec=0 of each market becomes our authoritative target_price.
 CHAINLINK_WS = "wss://ws-live-data.polymarket.com"
@@ -155,73 +139,9 @@ def now_epoch_s() -> int:
 
 
 def floor_to_5m_epoch(epoch_s: Optional[int] = None) -> int:
-    """Legacy. Use floor_to_window_epoch() instead. Kept for backward compat."""
     if epoch_s is None:
         epoch_s = now_epoch_s()
     return (epoch_s // 300) * 300
-
-
-def _et_tz():
-    """Return the ET timezone (handles EDT/EST automatically). Falls back to a
-    fixed -4 offset (EDT) if zoneinfo is unavailable."""
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo("America/New_York")
-    except Exception:
-        from datetime import timezone as _tz, timedelta as _td
-        return _tz(_td(hours=-4))
-
-
-def floor_to_window_epoch(epoch_s: Optional[int] = None) -> int:
-    """Round time down to the current WINDOW boundary.
-    For 1h/1d (calendar slugs) the floor is computed in ET, NOT UTC, so the
-    floored epoch maps to the correct ET hour/date."""
-    if epoch_s is None:
-        epoch_s = now_epoch_s()
-    cfg = WINDOW_CONFIG[WINDOW]
-    pattern = cfg["pattern"]
-    if pattern == "epoch":
-        # 5m, 15m, 4h — UTC-aligned epoch boundaries
-        step = cfg["step"]
-        return (epoch_s // step) * step
-    elif pattern == "calendar_h":
-        from datetime import datetime as _dt
-        et = _dt.fromtimestamp(epoch_s, tz=_et_tz())
-        floored = et.replace(minute=0, second=0, microsecond=0)
-        return int(floored.timestamp())
-    elif pattern == "calendar_d":
-        from datetime import datetime as _dt
-        et = _dt.fromtimestamp(epoch_s, tz=_et_tz())
-        floored = et.replace(hour=0, minute=0, second=0, microsecond=0)
-        return int(floored.timestamp())
-    raise ValueError(f"unknown window pattern: {pattern}")
-
-
-def build_window_slug(epoch_s: Optional[int] = None) -> str:
-    """Build the Polymarket slug for the current WINDOW + COIN at the given epoch.
-    Returns the slug WITHOUT the URL prefix (e.g. 'btc-updown-5m-1777748700' or
-    'bitcoin-up-or-down-may-2-2026-12pm-et')."""
-    cfg = WINDOW_CONFIG[WINDOW]
-    if epoch_s is None:
-        epoch_s = now_epoch_s()
-    if cfg["pattern"] == "epoch":
-        ep = (epoch_s // cfg["step"]) * cfg["step"]
-        short = COIN_SHORT_NAMES.get(COIN, COIN.lower())
-        return f"{short}-updown-{WINDOW}-{ep}"
-    elif cfg["pattern"] in ("calendar_h", "calendar_d"):
-        from datetime import datetime as _dt
-        ts = _dt.fromtimestamp(epoch_s, tz=_et_tz())
-        month = ts.strftime("%B").lower()
-        day = ts.day
-        year = ts.year
-        long = COIN_LONG_NAMES.get(COIN, COIN.lower())
-        if cfg["pattern"] == "calendar_h":
-            hour_12 = ts.hour % 12 or 12
-            ampm = "am" if ts.hour < 12 else "pm"
-            return f"{long}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
-        else:  # calendar_d
-            return f"{long}-up-or-down-on-{month}-{day}-{year}"
-    raise ValueError(f"unknown window pattern: {cfg['pattern']}")
 
 
 def sec_from_start(market_epoch: Optional[int]) -> Optional[int]:
@@ -829,6 +749,28 @@ def identify_side(state: RecorderState, ev: dict) -> Tuple[Optional[str], Option
     return None, None
 
 
+def _expand_price_change_event(ev: dict) -> List[dict]:
+    """Polymarket emits 'price_change' events as a wrapper containing a
+    nested 'price_changes' array, where each item has its own asset_id and
+    price/size. Expand into individual events the rest of the pipeline can use.
+    Without this, identify_side() returns None for these (no top-level asset_id)
+    and 81% of book updates are silently dropped."""
+    out = []
+    market = ev.get("market")
+    timestamp = ev.get("timestamp")
+    for ch in ev.get("price_changes") or []:
+        if not isinstance(ch, dict):
+            continue
+        sub = dict(ch)  # copy: has asset_id, price, size, side, hash, ...
+        if market and "market" not in sub:
+            sub["market"] = market
+        if timestamp and "timestamp" not in sub:
+            sub["timestamp"] = timestamp
+        sub["event_type"] = "price_change"
+        out.append(sub)
+    return out
+
+
 def parse_poly_message(state: RecorderState, raw: str, csvs: CsvStore) -> None:
     if RAW_POLY_SAVE:
         csvs.raw_poly(raw)
@@ -844,6 +786,14 @@ def parse_poly_message(state: RecorderState, raw: str, csvs: CsvStore) -> None:
             events = [x for x in msg["data"] if isinstance(x, dict)]
         else:
             events = [msg]
+    # Expand any 'price_change' wrappers into individual asset-level events
+    expanded: List[dict] = []
+    for ev in events:
+        if isinstance(ev, dict) and isinstance(ev.get("price_changes"), list):
+            expanded.extend(_expand_price_change_event(ev))
+        else:
+            expanded.append(ev)
+    events = expanded
     raw_len = len(raw)
     for ev in events:
         side_name, side_state = identify_side(state, ev)
@@ -962,6 +912,13 @@ async def chainlink_loop(state: RecorderState, csvs: CsvStore) -> None:
 
 
 async def poly_loop(state: RecorderState, csvs: CsvStore) -> None:
+    """Polymarket CLOB WS subscription loop.
+
+    KEY DESIGN: reconnect on every market rollover. Long-lived connections
+    silently stop receiving book updates after a few minutes (observed:
+    poly_book_ticks froze 3 min after recorder start, despite SUBSCRIBE being
+    re-sent on every market change). The home LIVE bot uses the same pattern
+    (one WS per market) and gets continuous data."""
     last_sub_key = None
     while not state.should_stop:
         try:
@@ -969,11 +926,16 @@ async def poly_loop(state: RecorderState, csvs: CsvStore) -> None:
             async with websockets.connect(POLY_WS, ping_interval=20, ping_timeout=20, max_size=2**24) as ws:
                 state.poly_status = "connected"
                 csvs.event("POLY_CONNECTED", "connected")
+                connection_market = None  # the market we subscribed to on this connection
                 while not state.should_stop:
                     if not state.market or not state.market.up_token or not state.market.down_token:
                         await asyncio.sleep(0.25)
                         continue
                     sub_key = (state.market.slug, state.market.up_token, state.market.down_token)
+                    # Force reconnect when market changes mid-connection (after first market)
+                    if connection_market is not None and sub_key != connection_market:
+                        csvs.event("POLY_ROLLOVER_RECONNECT", f"old={connection_market[0]} new={sub_key[0]}")
+                        break
                     if sub_key != last_sub_key:
                         subscribe_msg = {
                             "type": "market",
@@ -983,6 +945,7 @@ async def poly_loop(state: RecorderState, csvs: CsvStore) -> None:
                         await ws.send(json.dumps(subscribe_msg))
                         csvs.event("POLY_SUBSCRIBE", f"{state.market.slug} UP={state.market.up_token} DOWN={state.market.down_token}")
                         last_sub_key = sub_key
+                        connection_market = sub_key
                         state.poly_status = "live"
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
@@ -1122,30 +1085,24 @@ def log_market_outcome_if_ready(state: RecorderState, csvs: CsvStore, source: st
 
 async def market_rollover_loop(state: RecorderState, csvs: CsvStore, initial_slug: str) -> None:
     state.base_slug = initial_slug
-    step = WINDOW_CONFIG[WINDOW]["step"]
-    pattern = WINDOW_CONFIG[WINDOW]["pattern"]
     while not state.should_stop:
         try:
-            desired_epoch = floor_to_window_epoch()
+            desired_epoch = floor_to_5m_epoch()
             if state.loaded_epoch != desired_epoch:
                 old_epoch = state.loaded_epoch
                 if old_epoch is not None:
                     log_market_outcome_if_ready(state, csvs, "rollover")
-                desired_slug = build_window_slug(desired_epoch)
+                desired_slug = slug_with_new_suffix(state.base_slug, desired_epoch)
                 state.last_rollover_text = f"{old_epoch if old_epoch else '-'} -> {desired_epoch}"
                 state.up = OrderBookSide()
                 state.down = OrderBookSide()
-                # Try current epoch first, then +/-1 step as recovery (only for epoch-style slugs)
-                if pattern == "epoch":
-                    candidates = (desired_epoch, desired_epoch + step, desired_epoch - step)
-                else:
-                    candidates = (desired_epoch,)
+                # Try current epoch first, then +300/-300 as recovery.
                 fetched = None
-                for ep in candidates:
+                for ep in (desired_epoch, desired_epoch + 300, desired_epoch - 300):
                     if ep <= 0:
                         continue
                     try:
-                        slug = build_window_slug(ep)
+                        slug = slug_with_new_suffix(state.base_slug, ep)
                         fetched = fetch_market_info_for_slug(slug)
                         break
                     except Exception as e:
@@ -1304,15 +1261,16 @@ async def screen_loop(state: RecorderState) -> None:
 
 
 async def async_main() -> None:
-    # Compute the current market slug for our window (5m/15m/1h/4h/1d)
-    initial_slug = build_window_slug()
-    print(f"COIN: {COIN}  TICKER: {BINANCE_TICKER}  WINDOW: {WINDOW}  DATA_DIR: {DATA_DIR}")
+    # Compute current 5-min market URL based on slug prefix and current epoch
+    epoch = (int(time.time()) // 300) * 300
+    initial_slug = f"{SLUG_PREFIX}{epoch}"
+    print(f"COIN: {COIN}  TICKER: {BINANCE_TICKER}  DATA_DIR: {DATA_DIR}")
     print(f"BINANCE_WS: {BINANCE_WS}")
-    print(f"Initial slug computed for current {WINDOW} market: {initial_slug}")
+    print(f"Initial slug computed for current 5-min market: {initial_slug}")
 
     csvs = CsvStore(data_dir=DATA_DIR)
     csvs.init_clean()
-    csvs.event("START", f"Recorder started for {COIN} ({BINANCE_TICKER}) window={WINDOW}; old data cleared")
+    csvs.event("START", f"Recorder started for {COIN} ({BINANCE_TICKER}); old data cleared")
 
     state = RecorderState()
     loop = asyncio.get_running_loop()
@@ -1345,28 +1303,24 @@ async def async_main() -> None:
 def parse_args():
     import argparse
     p = argparse.ArgumentParser(description="Multi-coin Binance+Polymarket research recorder.")
-    p.add_argument("--coin", required=True, help="Coin symbol uppercase (e.g. BTC, ETH, SOL, XRP, DOGE, BNB, HYPE)")
-    p.add_argument("--window", default="5m", choices=["5m", "15m", "1h", "4h", "1d"],
-                   help="Polymarket market window. Default 5m. Other: 15m, 1h, 4h, 1d (daily)")
+    p.add_argument("--coin", required=True, help="Coin symbol uppercase (e.g. BTC, ETH, SOL, XRP, DOGE, BNB)")
     p.add_argument("--ticker", default=None,
-                   help="Binance ticker (default = <COIN>USDT)")
+                   help="Binance ticker (default = <COIN>USDT, e.g. BTCUSDT)")
     p.add_argument("--slug-prefix", default=None,
-                   help="(deprecated, ignored — slug pattern is now derived from --coin and --window)")
+                   help="Polymarket slug prefix (default = '<coin-lower>-updown-5m-')")
     p.add_argument("--data-dir", default=None,
-                   help="Output directory (default = 'data_<coin-lower>_<window>_research')")
+                   help="Output directory (default = 'data_<coin-lower>_5m_research')")
     return p.parse_args()
 
 
 def main() -> None:
-    global COIN, BINANCE_TICKER, BINANCE_WS, SLUG_PREFIX, DATA_DIR, CHAINLINK_SYMBOL, WINDOW
+    global COIN, BINANCE_TICKER, BINANCE_WS, SLUG_PREFIX, DATA_DIR, CHAINLINK_SYMBOL
     args = parse_args()
     COIN = args.coin.upper()
-    WINDOW = args.window
     BINANCE_TICKER = (args.ticker or f"{COIN}USDT").upper()
     BINANCE_WS = f"wss://stream.binance.com:9443/ws/{BINANCE_TICKER.lower()}@trade"
-    # SLUG_PREFIX is computed from window — kept for backward compat / error messages
-    SLUG_PREFIX = build_window_slug(0).rsplit("-", 1)[0] + "-" if WINDOW_CONFIG[WINDOW]["pattern"] == "epoch" else ""
-    DATA_DIR = args.data_dir or f"data_{COIN.lower()}_{WINDOW}_research"
+    SLUG_PREFIX = args.slug_prefix or f"{COIN.lower()}-updown-5m-"
+    DATA_DIR = args.data_dir or f"data_{COIN.lower()}_5m_research"
     CHAINLINK_SYMBOL = COIN_TO_CHAINLINK_SYMBOL.get(COIN, f"{COIN.lower()}/usd")
     try:
         asyncio.run(async_main())
