@@ -80,11 +80,12 @@ def render_buffered(render_fn) -> None:
         render_fn()
     finally:
         sys.stdout = saved
-    # Full clear + home + hide cursor before each frame.
-    # \033[2J = clear entire screen, \033[H = cursor home, \033[?25l = hide cursor.
-    # Using full clear (not just clear-to-end) prevents duplicate output when the
-    # terminal is resized or scrolled.
-    sys.stdout.write("\033[2J\033[H\033[?25l" + buf.getvalue())
+    # Aggressive clear before each frame:
+    #   \033[H   = cursor home
+    #   \033[2J  = clear entire screen
+    #   \033[3J  = clear scrollback buffer (prevents previous frames showing on resize)
+    #   \033[?25l = hide cursor
+    sys.stdout.write("\033[H\033[2J\033[3J\033[?25l" + buf.getvalue())
     sys.stdout.flush()
 
 
