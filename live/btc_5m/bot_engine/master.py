@@ -229,36 +229,24 @@ class Master:
             _, _, b40_open_pnl = s.open_pnl_total(s.bot40)
             b40_realized = s.bot40.realized_pnl_total
             b40_total = b40_realized + b40_open_pnl
-            b40_dec = scr.colorize_decision(
-                s.bot40.last_decision,
-                active=str(s.bot40.last_decision).startswith("BUY"),
-            )
-            print(f"  BOT40 : {b40_dec}  trades={s.bot40.virtual_buy_count}  "
-                  f"W={s.bot40.wins} L={s.bot40.losses}  "
-                  f"PnL={scr.color_money(b40_total)}  OPEN={scr.color_money(b40_open_pnl)}")
             if s.bot40.last_buy:
                 lb = s.bot40.last_buy
-                print(f"          LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} "
-                      f"sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}")
+                last40 = f"LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}"
             else:
-                print(f"          LAST: -")
+                last40 = "LAST: -"
+            print(f"  BOT40 : trades={s.bot40.virtual_buy_count} W={s.bot40.wins} L={s.bot40.losses} "
+                  f"PnL={scr.color_money(b40_total)} OPEN={scr.color_money(b40_open_pnl)}  {last40}")
 
             _, _, b120_open_pnl = s.open_pnl_total(s.bot120)
             b120_realized = s.bot120.realized_pnl_total
             b120_total = b120_realized + b120_open_pnl
-            b120_dec = scr.colorize_decision(
-                s.bot120.last_decision,
-                active=str(s.bot120.last_decision).startswith("BUY"),
-            )
-            print(f"  BOT120: {b120_dec}  trades={s.bot120.virtual_buy_count}  "
-                  f"W={s.bot120.wins} L={s.bot120.losses}  "
-                  f"PnL={scr.color_money(b120_total)}  OPEN={scr.color_money(b120_open_pnl)}")
             if s.bot120.last_buy:
                 lb = s.bot120.last_buy
-                print(f"          LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} "
-                      f"sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}")
+                last120 = f"LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}"
             else:
-                print(f"          LAST: -")
+                last120 = "LAST: -"
+            print(f"  BOT120: trades={s.bot120.virtual_buy_count} W={s.bot120.wins} L={s.bot120.losses} "
+                  f"PnL={scr.color_money(b120_total)} OPEN={scr.color_money(b120_open_pnl)}  {last120}")
 
             coin_total = b40_total + b120_total
             coin_open = b40_open_pnl + b120_open_pnl
