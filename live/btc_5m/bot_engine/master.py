@@ -189,29 +189,93 @@ class Master:
             addr_str = self.wallet.address[:8] + "..." if self.wallet.address else "-"
             print(f"WALLET     : {bal_str}   addr={addr_str}")
         print("-" * width)
-        print(f"{'COIN':<6}{'PNL_TODAY':<14}{'TRADES':<8}{'OPEN_BOT40':<14}"
-              f"{'OPEN_BOT120':<14}{'KILLED?':<10}{'NOTE'}")
+
+        total_realized = 0.0
+        total_open_pnl = 0.0
+        total_trades = 0
+
         for coin in sorted(self.runtimes.keys()):
             rt = self.runtimes[coin]
             s = rt.strategy
-            _, _, b40_pnl = s.open_pnl_total(s.bot40)
-            _, _, b120_pnl = s.open_pnl_total(s.bot120)
-            trades = s.bot40.virtual_buy_count + s.bot120.virtual_buy_count
-            killed = "YES" if s.killed_for_daily_loss else "no"
-            print(f"{coin:<6}"
-                  f"{scr.color_money(s.daily_realized_pnl):<24}"
-                  f"{trades:<8}"
-                  f"{scr.color_money(b40_pnl):<24}"
-                  f"{scr.color_money(b120_pnl):<24}"
-                  f"{killed:<10}"
-                  f"{scr.trim_cell(s.bot40.last_note, 60)}")
-        print("=" * width)
-        # Combined totals
-        total_pnl = sum(rt.strategy.daily_realized_pnl for rt in self.runtimes.values())
-        total_trades = sum(rt.strategy.bot40.virtual_buy_count
-                           + rt.strategy.bot120.virtual_buy_count
-                           for rt in self.runtimes.values())
-        print(f"COMBINED   : trades={total_trades}   pnl_today={scr.color_money(total_pnl)}")
+            market = rt.market
+
+            slug = market.current.get("slug") or "-"
+            sec_now = market.seconds_from_market_start()
+            end = market.current.get("end_date") or "-"
+            if end != "-" and "T" in str(end):
+                end = str(end).split("T")[1].rstrip("Z")[:8]
+
+            print(f"{scr.ANSI_BOLD}{scr.ANSI_CYAN}[{coin}]{scr.ANSI_RESET}  "
+                  f"{slug}  sec={sec_now}/300  end={end}")
+
+            btc_price = market.binance.price
+            target, target_source = market.resolve_target_in_use()
+            distance = None
+            if btc_price is not None and target is not None:
+                distance = btc_price - target
+
+            btc_str = scr.fmt(btc_price, 2)
+            tgt_str = scr.fmt(target, 2)
+            dist_str = "-" if distance is None else f"{distance:+.2f}"
+            print(f"  BINANCE: ${btc_str}  TARGET: ${tgt_str} ({target_source or '-'})  DIST: {dist_str}")
+
+            up_bid = market.prices["UP"]["best_bid"]
+            up_ask = market.prices["UP"]["best_ask"]
+            down_bid = market.prices["DOWN"]["best_bid"]
+            down_ask = market.prices["DOWN"]["best_ask"]
+            print(f"  UP:   bid={scr.fmt(up_bid, 3)} ask={scr.fmt(up_ask, 3)}  |  "
+                  f"DOWN: bid={scr.fmt(down_bid, 3)} ask={scr.fmt(down_ask, 3)}")
+
+            _, _, b40_open_pnl = s.open_pnl_total(s.bot40)
+            b40_realized = s.bot40.realized_pnl_total
+            b40_total = b40_realized + b40_open_pnl
+            b40_dec = scr.colorize_decision(
+                s.bot40.last_decision,
+                active=str(s.bot40.last_decision).startswith("BUY"),
+            )
+            print(f"  BOT40 : {b40_dec}  trades={s.bot40.virtual_buy_count}  "
+                  f"W={s.bot40.wins} L={s.bot40.losses}  "
+                  f"PnL={scr.color_money(b40_total)}  OPEN={scr.color_money(b40_open_pnl)}")
+            if s.bot40.last_buy:
+                lb = s.bot40.last_buy
+                print(f"          LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} "
+                      f"sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}")
+            else:
+                print(f"          LAST: -")
+
+            _, _, b120_open_pnl = s.open_pnl_total(s.bot120)
+            b120_realized = s.bot120.realized_pnl_total
+            b120_total = b120_realized + b120_open_pnl
+            b120_dec = scr.colorize_decision(
+                s.bot120.last_decision,
+                active=str(s.bot120.last_decision).startswith("BUY"),
+            )
+            print(f"  BOT120: {b120_dec}  trades={s.bot120.virtual_buy_count}  "
+                  f"W={s.bot120.wins} L={s.bot120.losses}  "
+                  f"PnL={scr.color_money(b120_total)}  OPEN={scr.color_money(b120_open_pnl)}")
+            if s.bot120.last_buy:
+                lb = s.bot120.last_buy
+                print(f"          LAST: {lb.get('side')} @{scr.fmt(lb.get('avg_fill'), 3)} "
+                      f"sec={lb.get('sec')} spent=${lb.get('spent', 0):.2f}")
+            else:
+                print(f"          LAST: -")
+
+            coin_total = b40_total + b120_total
+            coin_open = b40_open_pnl + b120_open_pnl
+            coin_realized = b40_realized + b120_realized
+            coin_trades = s.bot40.virtual_buy_count + s.bot120.virtual_buy_count
+            killed_tag = f"  {scr.ANSI_RED}[KILLED]{scr.ANSI_RESET}" if s.killed_for_daily_loss else ""
+            print(f"  TOTAL : trades={coin_trades}  PnL={scr.color_money(coin_total)}  "
+                  f"(real={scr.color_money(coin_realized)}  open={scr.color_money(coin_open)}){killed_tag}")
+            print("-" * width)
+
+            total_realized += coin_realized
+            total_open_pnl += coin_open
+            total_trades += coin_trades
+
+        total_pnl = total_realized + total_open_pnl
+        print(f"COMBINED ALL COINS: trades={total_trades}  PnL={scr.color_money(total_pnl)}  "
+              f"(real={scr.color_money(total_realized)}  open={scr.color_money(total_open_pnl)})")
         print("Ctrl+C to stop.")
 
     async def _render_loop(self) -> None:
