@@ -51,11 +51,11 @@ P = "/root/data_btc_15m_research/combined_per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_virtual_trades.csv"
 
-INVEST_PER_SIDE = 50.0
-# Tiered entry: open up to 3 trades per (direction, market) at increasing
-# profit thresholds. Once tier N is opened, lower tiers cannot re-open
-# (only higher-profit tiers going forward).
-TIER_COST_THRESHOLDS = [0.90, 0.85, 0.80]   # 10% / 15% / 20% profit
+INVEST_PER_SIDE_TARGET = 100.0   # ideal $ per side
+INVEST_MIN = 5.0                 # don't bother with trades smaller than $5/side
+COST_THRESHOLD = 0.90            # open when cost ≤ this (≥10% profit)
+MAX_TRADES_PER_MARKET = 15       # cap per 15min market (across both directions)
+COOLDOWN_SEC = 5                 # min seconds between opens on same (direction,market)
 MAX_STRIKE_DIFF = 50
 POLL_SEC = 2
 # Refuse to open trades when the data feed is stale (last row older than this)
@@ -322,9 +322,9 @@ def render_status(latest_k, latest_p):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     out.append(f"{ANSI_BOLD}ARB_VIRTUAL_BOT{ANSI_RESET}  mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  "
-               f"${INVEST_PER_SIDE:.0f}/side (${INVEST_PER_SIDE*2:.0f}/trade)")
+               f"target=${INVEST_PER_SIDE_TARGET:.0f}/side  cap={MAX_TRADES_PER_MARKET}/market  cooldown={COOLDOWN_SEC}s")
     out.append("=" * width)
-    out.append(f"TIME : {now}    TIERS: T1≤0.90 (10%) / T2≤0.85 (15%) / T3≤0.80 (20%)")
+    out.append(f"TIME : {now}    OPEN if cost≤{COST_THRESHOLD}  (size = min(${INVEST_PER_SIDE_TARGET:.0f}, depth/2))")
     out.append("-" * width)
 
     # Market section — BRM-style
@@ -343,10 +343,8 @@ def render_status(latest_k, latest_p):
         def cost_marker(c):
             if c <= 0 or c >= 999: return "—"
             pct = (1 - c) * 100
-            tier_hits = [i+1 for i, thr in enumerate(TIER_COST_THRESHOLDS) if c <= thr]
-            if tier_hits:
-                t_str = "+".join(f"T{t}" for t in tier_hits)
-                return f"{ANSI_GREEN}{ANSI_BOLD}cost={c:.3f} {pct:+.1f}% [{t_str}]{ANSI_RESET}"
+            if c <= COST_THRESHOLD:
+                return f"{ANSI_GREEN}{ANSI_BOLD}cost={c:.3f} {pct:+.1f}% [OPEN]{ANSI_RESET}"
             return f"cost={c:.3f} {pct:+.1f}%"
 
         out.append(f"  DIR-A  PolyUP+KalshiNO   {cost_marker(ca)}")
@@ -359,9 +357,8 @@ def render_status(latest_k, latest_p):
     if OPEN_TRADES:
         out.append(f"{ANSI_BOLD}OPEN ({len(OPEN_TRADES)}):{ANSI_RESET}")
         for tid, t in sorted(OPEN_TRADES.items()):
-            tier_str = f"T{t.get('tier','')}" if t.get('tier') else ""
             exp_profit = (1 - t['cost']) * t['invest_usd']
-            out.append(f"  #{tid:>3} {tier_str:>2} {t['direction']} cost={t['cost']:.3f} "
+            out.append(f"  #{tid:>3} {t['direction']} ${t['invest_usd']/2:>5.1f}/side cost={t['cost']:.3f} "
                        f"({t['profit_pct_open']:+.1f}%) exp={color_money(exp_profit)} "
                        f"poly@{t['poly_ask']:.2f} kalshi@{t['kalshi_ask']:.2f}")
     out.append("-" * width)
@@ -433,8 +430,9 @@ def main():
     init_log()
     load_existing_trades()
 
-    # Tiered entry tracking: per (direction, market_id), which tier indices were already opened.
-    opened_tiers = {}  # (direction, (slug, ticker)) -> set(tier_index)
+    # Per-market trade counts and per-(direction,market) cooldown timestamps
+    market_trade_count = {}   # (slug, ticker) -> int
+    last_open_ts = {}         # (direction, (slug, ticker)) -> epoch float
 
     while True:
         try:
@@ -462,49 +460,53 @@ def main():
                 ]:
                     if cost <= 0 or cost >= 999 or strike_diff >= MAX_STRIKE_DIFF:
                         continue
+                    # Cost gate
+                    if cost > COST_THRESHOLD:
+                        continue
                     # Skip extreme price imbalances — empirically these lose money
                     if abs(poly_ask - kalshi_ask) > MAX_PRICE_GAP:
                         continue
-                    # Depth check — refuse to virtual-trade if either side
-                    # doesn't have enough USD at best ask for our $50 size.
-                    # (real bot would have to walk the book = slippage)
-                    if poly_usd_avail < INVEST_PER_SIDE or kalshi_usd_avail < INVEST_PER_SIDE:
+                    # Depth-based sizing: target $100/side, but never take more
+                    # than half the smaller side's available depth (avoid slippage).
+                    min_depth = min(poly_usd_avail, kalshi_usd_avail)
+                    if min_depth >= INVEST_PER_SIDE_TARGET:
+                        invest_per_side = INVEST_PER_SIDE_TARGET
+                    else:
+                        invest_per_side = min_depth / 2.0
+                    if invest_per_side < INVEST_MIN:
                         continue
+                    # Per-market cap and cooldown
                     market_id = (p["slug"], k["ticker"])
+                    if market_trade_count.get(market_id, 0) >= MAX_TRADES_PER_MARKET:
+                        continue
                     key = (direction, market_id)
-                    if key not in opened_tiers:
-                        opened_tiers[key] = set()
-                    # Open every tier we now qualify for that we haven't opened yet
-                    for tier_idx, thr in enumerate(TIER_COST_THRESHOLDS):
-                        if tier_idx in opened_tiers[key]:
-                            continue
-                        if cost > thr:
-                            continue
-                        opened_tiers[key].add(tier_idx)
-                        poly_shares = INVEST_PER_SIDE / poly_ask
-                        kalshi_shares = INVEST_PER_SIDE / kalshi_ask
-                        invest = INVEST_PER_SIDE * 2
-                        profit_pct_open = (1.0 - cost) * 100
-                        now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        OPEN_TRADES[NEXT_TRADE_ID] = {
-                            "trade_id": NEXT_TRADE_ID,
-                            "open_ts": now_ts,
-                            "direction": direction,
-                            "tier": tier_idx + 1,
-                            "tier_threshold": thr,
-                            "poly_slug": p["slug"],
-                            "kalshi_ticker": k["ticker"],
-                            "kalshi_market_ticker": k.get("market_ticker", ""),
-                            "strike": k["strike"],
-                            "poly_ask": round(poly_ask, 4),
-                            "kalshi_ask": round(kalshi_ask, 4),
-                            "cost": round(cost, 4),
-                            "profit_pct_open": round(profit_pct_open, 2),
-                            "poly_shares": round(poly_shares, 4),
-                            "kalshi_shares": round(kalshi_shares, 4),
-                            "invest_usd": invest,
-                        }
-                        NEXT_TRADE_ID += 1
+                    if time.time() - last_open_ts.get(key, 0) < COOLDOWN_SEC:
+                        continue
+
+                    last_open_ts[key] = time.time()
+                    market_trade_count[market_id] = market_trade_count.get(market_id, 0) + 1
+                    poly_shares = invest_per_side / poly_ask
+                    kalshi_shares = invest_per_side / kalshi_ask
+                    invest = invest_per_side * 2
+                    profit_pct_open = (1.0 - cost) * 100
+                    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    OPEN_TRADES[NEXT_TRADE_ID] = {
+                        "trade_id": NEXT_TRADE_ID,
+                        "open_ts": now_ts,
+                        "direction": direction,
+                        "poly_slug": p["slug"],
+                        "kalshi_ticker": k["ticker"],
+                        "kalshi_market_ticker": k.get("market_ticker", ""),
+                        "strike": k["strike"],
+                        "poly_ask": round(poly_ask, 4),
+                        "kalshi_ask": round(kalshi_ask, 4),
+                        "cost": round(cost, 4),
+                        "profit_pct_open": round(profit_pct_open, 2),
+                        "poly_shares": round(poly_shares, 4),
+                        "kalshi_shares": round(kalshi_shares, 4),
+                        "invest_usd": round(invest, 4),
+                    }
+                    NEXT_TRADE_ID += 1
 
             # Settle any ready trades; on settle, append to CLOSED_TRADES
             ready_to_settle = list(OPEN_TRADES.keys())
