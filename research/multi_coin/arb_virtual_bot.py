@@ -251,6 +251,113 @@ def settle_trade_if_ready(trade_id: int) -> bool:
     return True
 
 
+CLOSED_TRADES = []  # list of settled trade dicts (in memory for display)
+ANSI_RESET = "\033[0m"
+ANSI_GREEN = "\033[32m"
+ANSI_RED = "\033[31m"
+ANSI_BOLD = "\033[1m"
+ANSI_CYAN = "\033[36m"
+
+
+def color_money(v):
+    s = f"${v:+,.2f}"
+    if v > 0:
+        return f"{ANSI_GREEN}{s}{ANSI_RESET}"
+    if v < 0:
+        return f"{ANSI_RED}{s}{ANSI_RESET}"
+    return s
+
+
+def render_status(latest_k, latest_p):
+    """V3-style updating screen — full clear + redraw."""
+    width = 110
+    # Aggressive clear: home + clear screen + clear scrollback
+    out = ["\033[H\033[2J\033[3J\033[?25l"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    out.append(f"{ANSI_BOLD}ARB_VIRTUAL_BOT{ANSI_RESET}   "
+               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET} "
+               f"${INVEST_PER_SIDE:.0f}/side  total=${INVEST_PER_SIDE*2:.0f}/trade")
+    out.append("=" * width)
+    out.append(f"LOCAL TIME : {now}")
+    out.append(f"THRESHOLD  : cost ≤ {THRESHOLD_COST} (≥{(1-THRESHOLD_COST)*100:.0f}% profit) | "
+               f"strike_diff < ${MAX_STRIKE_DIFF}")
+    out.append("-" * width)
+
+    # Live status
+    if latest_k and latest_p:
+        sd = (abs(latest_k["strike"] - latest_p["tgt"])
+              if latest_k["strike"] > 0 and latest_p["tgt"] > 0 else 999)
+        ca = (latest_p["ua"] + latest_k["na"]) if latest_p["ua"] > 0 and latest_k["na"] > 0 else 0
+        cb = (latest_p["da"] + latest_k["ya"]) if latest_p["da"] > 0 and latest_k["ya"] > 0 else 0
+        out.append(f"POLY  : {latest_p['slug'][-30:]:<30}  UP_ask={latest_p['ua']:.3f} "
+                   f"DOWN_ask={latest_p['da']:.3f}  target=${latest_p['tgt']:,.2f}")
+        out.append(f"KALSHI: {latest_k['ticker'][-30:]:<30}  YES_ask={latest_k['ya']:.3f} "
+                   f"NO_ask={latest_k['na']:.3f}  strike=${latest_k['strike']:,.2f}")
+        out.append(f"strike_diff=${sd:.0f}")
+
+        def cost_line(label, c, threshold):
+            if c <= 0:
+                return f"  {label} — no data"
+            pct = (1 - c) * 100
+            mark = ""
+            if c <= threshold:
+                mark = f"  {ANSI_GREEN}{ANSI_BOLD}*** OPP ***{ANSI_RESET}"
+            elif c < 1.0:
+                mark = f"  ({pct:.1f}% — below threshold)"
+            else:
+                mark = "  (above $1, no arb)"
+            return f"  {label}  cost={c:.3f}  profit={pct:+.1f}%{mark}"
+
+        out.append(cost_line("Direction A (PolyUP+KalshiNO):  ", ca, THRESHOLD_COST))
+        out.append(cost_line("Direction B (PolyDOWN+KalshiYES):", cb, THRESHOLD_COST))
+    else:
+        out.append("waiting for data feeds...")
+    out.append("-" * width)
+
+    # Open trades
+    out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
+    if OPEN_TRADES:
+        for tid, t in sorted(OPEN_TRADES.items()):
+            out.append(f"  #{tid:>3}  dir={t['direction']}  open={t['open_ts']}  "
+                       f"cost={t['cost']:.3f} ({t['profit_pct_open']:+.1f}%)  "
+                       f"poly@{t['poly_ask']:.3f} kalshi@{t['kalshi_ask']:.3f}  "
+                       f"slug={t['poly_slug'][-12:]}")
+    else:
+        out.append("  (none)")
+    out.append("-" * width)
+
+    # Closed trades — last 10
+    n_closed = len(CLOSED_TRADES)
+    out.append(f"{ANSI_BOLD}CLOSED TRADES: {n_closed} (last 10 below){ANSI_RESET}")
+    for t in CLOSED_TRADES[-10:]:
+        out.append(f"  #{t['trade_id']:>3}  dir={t['direction']}  paid=${t['invest_usd']:.0f}  "
+                   f"payout=${t['total_payout']:.2f}  PnL={color_money(t['pnl'])} "
+                   f"({t['pnl_pct']:+.1f}%)  [poly:{t['poly_winner']} kalshi:{t['kalshi_winner']}]")
+    out.append("=" * width)
+
+    # Totals
+    if CLOSED_TRADES:
+        total_invest = sum(t["invest_usd"] for t in CLOSED_TRADES)
+        total_payout = sum(t["total_payout"] for t in CLOSED_TRADES)
+        total_pnl = total_payout - total_invest
+        wins = sum(1 for t in CLOSED_TRADES if t["pnl"] > 0)
+        losses = sum(1 for t in CLOSED_TRADES if t["pnl"] < 0)
+        pushes = sum(1 for t in CLOSED_TRADES if abs(t["pnl"]) < 0.01)
+        win_pct = 100.0 * wins / n_closed if n_closed else 0
+        roi = (total_pnl / total_invest * 100) if total_invest else 0
+        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} trades={n_closed}  W={wins} L={losses} P={pushes} "
+                   f"({win_pct:.0f}% win)  invested=${total_invest:.0f}  "
+                   f"payout=${total_payout:.2f}  PnL={color_money(total_pnl)} ({roi:+.1f}%)")
+    else:
+        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} no closed trades yet")
+    out.append("Ctrl+C to stop.")
+
+    sys_stdout = __import__("sys").stdout
+    sys_stdout.write("\n".join(out) + "\n")
+    sys_stdout.flush()
+
+
 def main():
     global NEXT_TRADE_ID
 
@@ -265,10 +372,6 @@ def main():
     # Track latest "below threshold" state to avoid duplicate trades on same opp
     state = {"A": False, "B": False}
     last_open_market = {"A": None, "B": None}  # (poly_slug, kalshi_ticker) tuple
-
-    print(f"arb_virtual_bot started threshold cost<{THRESHOLD_COST} invest=${INVEST_PER_SIDE}/side")
-    print(f"writing to {LOG}")
-    print()
 
     while True:
         try:
@@ -292,12 +395,9 @@ def main():
                     market_id = (p["slug"], k["ticker"])
                     if below and not state[direction]:
                         state[direction] = True
-                        # Only open ONE trade per (direction, market) — avoid re-buying
-                        # if cost briefly bounces above and back below
                         if last_open_market[direction] == market_id:
                             continue
                         last_open_market[direction] = market_id
-                        # Open virtual trade
                         poly_shares = INVEST_PER_SIDE / poly_ask
                         kalshi_shares = INVEST_PER_SIDE / kalshi_ask
                         invest = INVEST_PER_SIDE * 2
@@ -319,21 +419,30 @@ def main():
                             "kalshi_shares": round(kalshi_shares, 4),
                             "invest_usd": invest,
                         }
-                        print(f"OPEN trade #{NEXT_TRADE_ID} dir={direction} "
-                              f"cost={cost:.3f} profit={profit_pct_open:.1f}% "
-                              f"poly@{poly_ask:.3f} kalshi@{kalshi_ask:.3f} "
-                              f"slug={p['slug'][-12:]} ticker={k['ticker'][-12:]}")
                         NEXT_TRADE_ID += 1
                     elif not below and state[direction]:
                         state[direction] = False
 
-            # Try to settle any open trades
+            # Settle any ready trades; on settle, append to CLOSED_TRADES
             ready_to_settle = list(OPEN_TRADES.keys())
             for tid in ready_to_settle:
-                settle_trade_if_ready(tid)
+                if tid not in OPEN_TRADES:
+                    continue
+                t_before = OPEN_TRADES[tid]
+                if settle_trade_if_ready(tid):
+                    # settle_trade_if_ready already wrote to CSV and removed from OPEN
+                    # we need to re-fetch the settled trade dict — it was modified in place
+                    CLOSED_TRADES.append(t_before)
+
+            # Render screen
+            render_status(k, p)
 
         except Exception as e:
-            print(f"ERROR: {type(e).__name__}: {e}")
+            try:
+                with open(LOG, "a") as fh:
+                    fh.write(f"# error {datetime.now()}: {type(e).__name__}: {e}\n")
+            except Exception:
+                pass
 
         time.sleep(POLL_SEC)
 
