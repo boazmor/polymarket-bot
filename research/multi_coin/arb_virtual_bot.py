@@ -94,10 +94,18 @@ def parse_kalshi(row):
     if not row:
         return None
     try:
+        ya = float(row.get("yes_ask") or 0)
+        na = float(row.get("no_ask") or 0)
+        ya_sz = float(row.get("yes_ask_size") or 0)
+        na_sz = float(row.get("no_ask_size") or 0)
         return {
             "epoch": int(row.get("epoch_sec") or 0),
-            "ya": float(row.get("yes_ask") or 0),
-            "na": float(row.get("no_ask") or 0),
+            "ya": ya,
+            "na": na,
+            "ya_sz": ya_sz,        # contracts available at yes_ask
+            "na_sz": na_sz,        # contracts available at no_ask
+            "ya_usd": ya * ya_sz,  # USD available to buy YES at best ask
+            "na_usd": na * na_sz,  # USD available to buy NO at best ask
             "strike": float(row.get("floor_strike") or 0),
             "ticker": row.get("event_ticker", "") or "",
             "market_ticker": row.get("market_ticker", "") or "",
@@ -117,6 +125,9 @@ def parse_poly(row):
             "epoch": int(row.get("epoch_sec") or 0),
             "ua": float(row.get("up_ask") or 0),
             "da": float(row.get("down_ask") or 0),
+            # USD available to buy at best ask on each side (from recorder)
+            "ua_usd": float(row.get("up_usd_best") or 0),
+            "da_usd": float(row.get("down_usd_best") or 0),
             "tgt": float(row.get("target_chainlink_at_open") or 0),
             "slug": row.get("market_slug", "") or "",
             "market_epoch": int(row.get("market_epoch") or 0),
@@ -445,14 +456,19 @@ def main():
                 cost_a = (p["ua"] + k["na"]) if p["ua"] > 0 and k["na"] > 0 else 999
                 cost_b = (p["da"] + k["ya"]) if p["da"] > 0 and k["ya"] > 0 else 999
 
-                for direction, cost, poly_ask, kalshi_ask in [
-                    ("A", cost_a, p.get("ua", 0), k.get("na", 0)),
-                    ("B", cost_b, p.get("da", 0), k.get("ya", 0)),
+                for direction, cost, poly_ask, kalshi_ask, poly_usd_avail, kalshi_usd_avail in [
+                    ("A", cost_a, p.get("ua", 0), k.get("na", 0), p.get("ua_usd", 0), k.get("na_usd", 0)),
+                    ("B", cost_b, p.get("da", 0), k.get("ya", 0), p.get("da_usd", 0), k.get("ya_usd", 0)),
                 ]:
                     if cost <= 0 or cost >= 999 or strike_diff >= MAX_STRIKE_DIFF:
                         continue
                     # Skip extreme price imbalances — empirically these lose money
                     if abs(poly_ask - kalshi_ask) > MAX_PRICE_GAP:
+                        continue
+                    # Depth check — refuse to virtual-trade if either side
+                    # doesn't have enough USD at best ask for our $50 size.
+                    # (real bot would have to walk the book = slippage)
+                    if poly_usd_avail < INVEST_PER_SIDE or kalshi_usd_avail < INVEST_PER_SIDE:
                         continue
                     market_id = (p["slug"], k["ticker"])
                     key = (direction, market_id)
