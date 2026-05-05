@@ -52,7 +52,10 @@ PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_virtual_trades.csv"
 
 INVEST_PER_SIDE = 50.0
-THRESHOLD_COST = 0.90
+# Tiered entry: open up to 3 trades per (direction, market) at increasing
+# profit thresholds. Once tier N is opened, lower tiers cannot re-open
+# (only higher-profit tiers going forward).
+TIER_COST_THRESHOLDS = [0.90, 0.85, 0.80]   # 10% / 15% / 20% profit
 MAX_STRIKE_DIFF = 50
 POLL_SEC = 2
 
@@ -275,13 +278,15 @@ def render_status(latest_k, latest_p):
     out = ["\033[H\033[2J\033[3J\033[?25l"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    tiers_str = " / ".join(
+        f"T{i+1}≤{t} ({(1-t)*100:.0f}%)" for i, t in enumerate(TIER_COST_THRESHOLDS)
+    )
     out.append(f"{ANSI_BOLD}ARB_VIRTUAL_BOT{ANSI_RESET}   "
                f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET} "
                f"${INVEST_PER_SIDE:.0f}/side  total=${INVEST_PER_SIDE*2:.0f}/trade")
     out.append("=" * width)
     out.append(f"LOCAL TIME : {now}")
-    out.append(f"THRESHOLD  : cost ≤ {THRESHOLD_COST} (≥{(1-THRESHOLD_COST)*100:.0f}% profit) | "
-               f"strike_diff < ${MAX_STRIKE_DIFF}")
+    out.append(f"TIERS      : {tiers_str}  | strike_diff < ${MAX_STRIKE_DIFF}")
     out.append("-" * width)
 
     # Live status
@@ -296,21 +301,23 @@ def render_status(latest_k, latest_p):
                    f"NO_ask={latest_k['na']:.3f}  strike=${latest_k['strike']:,.2f}")
         out.append(f"strike_diff=${sd:.0f}")
 
-        def cost_line(label, c, threshold):
-            if c <= 0:
+        def cost_line(label, c):
+            if c <= 0 or c >= 999:
                 return f"  {label} — no data"
             pct = (1 - c) * 100
             mark = ""
-            if c <= threshold:
-                mark = f"  {ANSI_GREEN}{ANSI_BOLD}*** OPP ***{ANSI_RESET}"
+            tier_hits = [i+1 for i, thr in enumerate(TIER_COST_THRESHOLDS) if c <= thr]
+            if tier_hits:
+                tiers_label = "+".join(f"T{t}" for t in tier_hits)
+                mark = f"  {ANSI_GREEN}{ANSI_BOLD}*** OPP {tiers_label} ***{ANSI_RESET}"
             elif c < 1.0:
-                mark = f"  ({pct:.1f}% — below threshold)"
+                mark = f"  (below $1 but above tier-1 threshold)"
             else:
                 mark = "  (above $1, no arb)"
             return f"  {label}  cost={c:.3f}  profit={pct:+.1f}%{mark}"
 
-        out.append(cost_line("Direction A (PolyUP+KalshiNO):  ", ca, THRESHOLD_COST))
-        out.append(cost_line("Direction B (PolyDOWN+KalshiYES):", cb, THRESHOLD_COST))
+        out.append(cost_line("Direction A (PolyUP+KalshiNO):  ", ca))
+        out.append(cost_line("Direction B (PolyDOWN+KalshiYES):", cb))
     else:
         out.append("waiting for data feeds...")
     out.append("-" * width)
@@ -319,7 +326,9 @@ def render_status(latest_k, latest_p):
     out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
     if OPEN_TRADES:
         for tid, t in sorted(OPEN_TRADES.items()):
-            out.append(f"  #{tid:>3}  dir={t['direction']}  open={t['open_ts']}  "
+            tier = t.get("tier", "")
+            tier_str = f"T{tier}" if tier else ""
+            out.append(f"  #{tid:>3} {tier_str:>3}  dir={t['direction']}  open={t['open_ts']}  "
                        f"cost={t['cost']:.3f} ({t['profit_pct_open']:+.1f}%)  "
                        f"poly@{t['poly_ask']:.3f} kalshi@{t['kalshi_ask']:.3f}  "
                        f"slug={t['poly_slug'][-12:]}")
@@ -369,9 +378,8 @@ def main():
 
     init_log()
 
-    # Track latest "below threshold" state to avoid duplicate trades on same opp
-    state = {"A": False, "B": False}
-    last_open_market = {"A": None, "B": None}  # (poly_slug, kalshi_ticker) tuple
+    # Tiered entry tracking: per (direction, market_id), which tier indices were already opened.
+    opened_tiers = {}  # (direction, (slug, ticker)) -> set(tier_index)
 
     while True:
         try:
@@ -391,13 +399,19 @@ def main():
                     ("A", cost_a, p.get("ua", 0), k.get("na", 0)),
                     ("B", cost_b, p.get("da", 0), k.get("ya", 0)),
                 ]:
-                    below = cost < THRESHOLD_COST and strike_diff < MAX_STRIKE_DIFF
+                    if cost <= 0 or cost >= 999 or strike_diff >= MAX_STRIKE_DIFF:
+                        continue
                     market_id = (p["slug"], k["ticker"])
-                    if below and not state[direction]:
-                        state[direction] = True
-                        if last_open_market[direction] == market_id:
+                    key = (direction, market_id)
+                    if key not in opened_tiers:
+                        opened_tiers[key] = set()
+                    # Open every tier we now qualify for that we haven't opened yet
+                    for tier_idx, thr in enumerate(TIER_COST_THRESHOLDS):
+                        if tier_idx in opened_tiers[key]:
                             continue
-                        last_open_market[direction] = market_id
+                        if cost > thr:
+                            continue
+                        opened_tiers[key].add(tier_idx)
                         poly_shares = INVEST_PER_SIDE / poly_ask
                         kalshi_shares = INVEST_PER_SIDE / kalshi_ask
                         invest = INVEST_PER_SIDE * 2
@@ -407,6 +421,8 @@ def main():
                             "trade_id": NEXT_TRADE_ID,
                             "open_ts": now_ts,
                             "direction": direction,
+                            "tier": tier_idx + 1,
+                            "tier_threshold": thr,
                             "poly_slug": p["slug"],
                             "kalshi_ticker": k["ticker"],
                             "kalshi_market_ticker": k.get("market_ticker", ""),
@@ -420,8 +436,6 @@ def main():
                             "invest_usd": invest,
                         }
                         NEXT_TRADE_ID += 1
-                    elif not below and state[direction]:
-                        state[direction] = False
 
             # Settle any ready trades; on settle, append to CLOSED_TRADES
             ready_to_settle = list(OPEN_TRADES.keys())
