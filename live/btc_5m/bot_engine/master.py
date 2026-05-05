@@ -32,6 +32,7 @@ from bot_config import (
     HEARTBEAT_EVERY_SEC,
 )
 from bot_engine.binance import BinanceEngine
+from bot_engine.chainlink import ChainlinkClient
 from bot_engine.market_manager import MarketManager
 from bot_engine.reports import CoinResearchLogger
 from bot_engine.strategy import Strategy
@@ -47,17 +48,20 @@ class CoinRuntime:
         self.wallet = wallet
 
         self.binance = BinanceEngine(symbol=params.get("binance_symbol", f"{coin.lower()}usdt"))
+        self.chainlink = ChainlinkClient(coin=coin)
         self.logger = CoinResearchLogger(
             data_dir=params.get("data_dir", f"data_live_{coin.lower()}_5m"),
             coin=coin,
         )
         self.market = MarketManager(coin=coin, binance_engine=self.binance,
-                                     log_event=self._log_event_closure())
+                                     log_event=self._log_event_closure(),
+                                     chainlink_client=self.chainlink)
         self.strategy = Strategy(coin=coin, market_mgr=self.market,
                                  wallet=wallet, logger=self.logger,
                                  params=params)
 
         self.binance_task: Optional[asyncio.Task] = None
+        self.chainlink_task: Optional[asyncio.Task] = None
         self.poly_ws_task: Optional[asyncio.Task] = None
 
     def _log_event_closure(self):
@@ -289,6 +293,13 @@ class Master:
         for coin, rt in self.runtimes.items():
             rt.binance_task = asyncio.create_task(rt.binance.run())
 
+        # Spawn Chainlink feeds (Polymarket's own price source — used for target capture)
+        for coin, rt in self.runtimes.items():
+            rt.chainlink_task = asyncio.create_task(rt.chainlink.run())
+
+        # Give Chainlink a couple seconds to receive its first tick before loading markets
+        await asyncio.sleep(2)
+
         # Load initial markets (sequential — one HTTP call each)
         for coin, rt in self.runtimes.items():
             url = initial_urls.get(coin)
@@ -313,6 +324,10 @@ class Master:
                 rt.binance.stop()
             except Exception:
                 pass
-            for t in (rt.binance_task, rt.poly_ws_task):
+            try:
+                rt.chainlink.stop()
+            except Exception:
+                pass
+            for t in (rt.binance_task, rt.chainlink_task, rt.poly_ws_task):
                 if t and not t.done():
                     t.cancel()

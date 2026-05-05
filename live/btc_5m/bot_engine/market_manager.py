@@ -54,9 +54,11 @@ def _safe_float(x):
 class MarketManager:
     """Lifecycle manager for one coin's Polymarket markets."""
 
-    def __init__(self, coin: str, binance_engine, log_event: Callable[[str, str, str], None]):
+    def __init__(self, coin: str, binance_engine, log_event: Callable[[str, str, str], None],
+                 chainlink_client=None):
         self.coin = coin
         self.binance = binance_engine
+        self.chainlink = chainlink_client  # ChainlinkClient or None
         self.log_event = log_event  # closure: log_event(slug, event, detail)
 
         self.current: Dict = {
@@ -77,6 +79,7 @@ class MarketManager:
             "target_strike": None,
             "target_question": None,
             "target_rendered_page": None,
+            "target_chainlink_at_open": None,
             "target_binance_prev_5m_close": None,
             "target_binance_open": None,
             "render_retry_attempts": 0,
@@ -381,6 +384,7 @@ class MarketManager:
             "target_strike": strike_target,
             "target_question": question_target,
             "target_rendered_page": rendered_page_target,
+            "target_chainlink_at_open": None,
             "target_binance_prev_5m_close": None,
             "target_binance_open": None,
             "render_retry_attempts": 0,
@@ -443,9 +447,15 @@ class MarketManager:
         self.kickoff_render_target()
 
     def resolve_target_in_use(self) -> Tuple[Optional[float], Optional[str]]:
-        # Playwright path retained as fallback only (currently disabled).
-        # Primary sources are Polymarket-structured: eventMetadata, line, strike,
-        # next_data JSON. Question-text regex is last because it's only the rounded threshold.
+        # Priority order (most authoritative first):
+        # 1. Chainlink RTDS — same source Polymarket itself uses for resolution.
+        # 2. next_data / Playwright (rendered_page) — only for the rare case
+        #    Chainlink failed at market open.
+        # 3. Other Polymarket-structured fields (event_meta, line, strike).
+        # 4. Question-text regex — last (rounded threshold only).
+        cl = self.current.get("target_chainlink_at_open")
+        if cl is not None:
+            return float(cl), "chainlink_at_open"
         target = self.current.get("target_rendered_page")
         if target is not None:
             return target, "rendered_page"
@@ -459,6 +469,26 @@ class MarketManager:
             if v is not None:
                 return float(v), src
         return None, None
+
+    def capture_chainlink_target(self) -> None:
+        """Capture the current Chainlink price as this market's target.
+        Should be called once at market open (load or rollover)."""
+        if self.chainlink is None:
+            return
+        if self.current.get("target_chainlink_at_open") is not None:
+            return
+        cl_price = self.chainlink.price
+        if cl_price is None:
+            return
+        self.current["target_chainlink_at_open"] = float(cl_price)
+        try:
+            self.log_event(
+                self.current.get("slug") or "-",
+                "TARGET_CHAINLINK_AT_OPEN",
+                f"target={cl_price:.2f} symbol={self.chainlink.symbol}",
+            )
+        except Exception:
+            pass
 
     def kickoff_render_target(self) -> None:
         # Playwright disabled (2026-05-04) — was causing EPIPE crashes under
@@ -481,6 +511,7 @@ class MarketManager:
             raise RuntimeError(f"market not found for slug: {slug}")
         self.current.update(market)
         self.current["market_loaded_at"] = time.time()
+        self.capture_chainlink_target()
         self.capture_binance_prev_5m_close_target()
         self.capture_binance_open_target()
         await self.capture_rendered_page_target()
@@ -599,6 +630,7 @@ class MarketManager:
         self.current.update(market)
         self.current["market_loaded_at"] = time.time()
         self._render_task = None
+        self.capture_chainlink_target()
         self.capture_binance_prev_5m_close_target()
         self.capture_binance_open_target()
         self.kickoff_render_target()
