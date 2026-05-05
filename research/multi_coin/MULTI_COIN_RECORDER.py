@@ -536,8 +536,18 @@ class CsvStore:
         self.paths: Dict[str, str] = {}
 
     def init_clean(self) -> None:
-        if os.path.exists(self.data_dir):
-            shutil.rmtree(self.data_dir)
+        """SAFE init that preserves existing recordings across restarts.
+
+        Previously this method deleted the entire data_dir on every startup
+        — which silently destroyed days of data on each cron-restart. Now:
+          * if data_dir doesn't exist → create it + headers
+          * if data_dir exists with files → KEEP all data, only create
+            missing files with headers
+          * raw_poly opened in append mode (never truncated)
+
+        If you genuinely want a fresh slate, manually `rm -rf <data_dir>`
+        before launching the recorder.
+        """
         os.makedirs(self.data_dir, exist_ok=True)
         self.paths = {
             "combined": os.path.join(self.data_dir, "combined_per_second.csv"),
@@ -548,7 +558,7 @@ class CsvStore:
             "raw_poly": os.path.join(self.data_dir, "raw_poly_messages.jsonl"),
             "market_outcomes": os.path.join(self.data_dir, "market_outcomes.csv"),
         }
-        self._init_csv(self.paths["combined"], [
+        self._init_csv_safe(self.paths["combined"], [
             "local_ts", "epoch_sec", "market_slug", "market_epoch", "sec_from_start",
             "binance_price", "binance_age_sec", "target_price", "distance_signed", "distance_abs",
             # NEW columns — Chainlink RTDS (canonical resolution source)
@@ -565,28 +575,44 @@ class CsvStore:
             "delta_1s", "delta_5s", "delta_10s", "delta_30s", "volatility_30s",
             "poly_updates_total", "binance_ticks_total", "chainlink_ticks_total", "market_url",
         ])
-        self._init_csv(self.paths["binance_ticks"], [
+        self._init_csv_safe(self.paths["binance_ticks"], [
             "local_ts", "event_time_ms", "trade_time_ms", "price", "qty", "latency_ms", "raw_len"
         ])
-        self._init_csv(self.paths["poly_ticks"], [
+        self._init_csv_safe(self.paths["poly_ticks"], [
             "local_ts", "market_slug", "side", "event_type", "asset_id", "bid", "ask", "last",
             "ask_qty_best", "ask_usd_best", "qty_le_029", "usd_le_029", "qty_le_030", "usd_le_030",
             "qty_le_031", "usd_le_031", "qty_le_032", "usd_le_032", "qty_le_035", "usd_le_035",
             "raw_len"
         ])
-        self._init_csv(self.paths["markets"], [
+        self._init_csv_safe(self.paths["markets"], [
             "local_ts", "market_slug", "market_epoch", "url", "target_price", "up_token", "down_token",
             "start_iso", "end_iso", "question"
         ])
-        self._init_csv(self.paths["market_outcomes"], [
+        self._init_csv_safe(self.paths["market_outcomes"], [
             "local_ts", "market_slug", "market_epoch", "target_price", "final_binance_price",
             "final_distance_signed", "final_distance_abs", "winner_side", "source"
         ])
-        self._init_csv(self.paths["events"], ["local_ts", "event", "detail"])
-        open(self.paths["raw_poly"], "w", encoding="utf-8").close()
+        self._init_csv_safe(self.paths["events"], ["local_ts", "event", "detail"])
+        # raw_poly — append-mode open if missing, never truncate
+        if not os.path.exists(self.paths["raw_poly"]):
+            open(self.paths["raw_poly"], "a", encoding="utf-8").close()
+        # Log the resume event itself so we can see how many restarts happened
+        self.append_csv(self.paths["events"], [now_local(), "RECORDER_RESUME",
+                                                f"data_dir={self.data_dir}"])
+
+    @staticmethod
+    def _init_csv_safe(path: str, headers: List[str]) -> None:
+        """Create CSV with header ONLY if file is missing or empty.
+        If the file already has content, leave it alone — we'll just append.
+        """
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(headers)
 
     @staticmethod
     def _init_csv(path: str, headers: List[str]) -> None:
+        """Original truncate-and-write. Kept for explicit manual reset only."""
         with open(path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(headers)
 
