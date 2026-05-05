@@ -305,78 +305,64 @@ def color_money(v):
 
 
 def render_status(latest_k, latest_p):
-    """V3-style updating screen — full clear + redraw."""
-    width = 110
-    # Aggressive clear: home + clear screen + clear scrollback
+    """BRM/V3-style compact screen."""
+    width = 90
     out = ["\033[H\033[2J\033[3J\033[?25l"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    tiers_str = " / ".join(
-        f"T{i+1}≤{t} ({(1-t)*100:.0f}%)" for i, t in enumerate(TIER_COST_THRESHOLDS)
-    )
-    out.append(f"{ANSI_BOLD}ARB_VIRTUAL_BOT{ANSI_RESET}   "
-               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET} "
-               f"${INVEST_PER_SIDE:.0f}/side  total=${INVEST_PER_SIDE*2:.0f}/trade")
+    out.append(f"{ANSI_BOLD}ARB_VIRTUAL_BOT{ANSI_RESET}  mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  "
+               f"${INVEST_PER_SIDE:.0f}/side (${INVEST_PER_SIDE*2:.0f}/trade)")
     out.append("=" * width)
-    out.append(f"LOCAL TIME : {now}")
-    out.append(f"TIERS      : {tiers_str}  | strike_diff < ${MAX_STRIKE_DIFF}")
+    out.append(f"TIME : {now}    TIERS: T1≤0.90 (10%) / T2≤0.85 (15%) / T3≤0.80 (20%)")
     out.append("-" * width)
 
-    # Live status
+    # Market section — BRM-style
     if latest_k and latest_p:
         sd = (abs(latest_k["strike"] - latest_p["tgt"])
               if latest_k["strike"] > 0 and latest_p["tgt"] > 0 else 999)
         ca = (latest_p["ua"] + latest_k["na"]) if latest_p["ua"] > 0 and latest_k["na"] > 0 else 0
         cb = (latest_p["da"] + latest_k["ya"]) if latest_p["da"] > 0 and latest_k["ya"] > 0 else 0
-        out.append(f"POLY  : {latest_p['slug'][-30:]:<30}  UP_ask={latest_p['ua']:.3f} "
-                   f"DOWN_ask={latest_p['da']:.3f}  target=${latest_p['tgt']:,.2f}")
-        out.append(f"KALSHI: {latest_k['ticker'][-30:]:<30}  YES_ask={latest_k['ya']:.3f} "
-                   f"NO_ask={latest_k['na']:.3f}  strike=${latest_k['strike']:,.2f}")
-        out.append(f"strike_diff=${sd:.0f}")
 
-        def cost_line(label, c):
-            if c <= 0 or c >= 999:
-                return f"  {label} — no data"
+        slug_short = latest_p['slug'].replace("btc-updown-15m-", "")
+        ticker_short = latest_k['ticker'][-12:]
+        out.append(f"[BTC 15m]  poly={slug_short}  kalshi={ticker_short}  strike_diff=${sd:.0f}")
+        out.append(f"  POLY   target=${latest_p['tgt']:,.0f}  UP={latest_p['ua']:.3f}  DOWN={latest_p['da']:.3f}")
+        out.append(f"  KALSHI strike=${latest_k['strike']:,.0f}  YES={latest_k['ya']:.3f}  NO={latest_k['na']:.3f}")
+
+        def cost_marker(c):
+            if c <= 0 or c >= 999: return "—"
             pct = (1 - c) * 100
-            mark = ""
             tier_hits = [i+1 for i, thr in enumerate(TIER_COST_THRESHOLDS) if c <= thr]
             if tier_hits:
-                tiers_label = "+".join(f"T{t}" for t in tier_hits)
-                mark = f"  {ANSI_GREEN}{ANSI_BOLD}*** OPP {tiers_label} ***{ANSI_RESET}"
-            elif c < 1.0:
-                mark = f"  (below $1 but above tier-1 threshold)"
-            else:
-                mark = "  (above $1, no arb)"
-            return f"  {label}  cost={c:.3f}  profit={pct:+.1f}%{mark}"
+                t_str = "+".join(f"T{t}" for t in tier_hits)
+                return f"{ANSI_GREEN}{ANSI_BOLD}cost={c:.3f} {pct:+.1f}% [{t_str}]{ANSI_RESET}"
+            return f"cost={c:.3f} {pct:+.1f}%"
 
-        out.append(cost_line("Direction A (PolyUP+KalshiNO):  ", ca))
-        out.append(cost_line("Direction B (PolyDOWN+KalshiYES):", cb))
+        out.append(f"  DIR-A  PolyUP+KalshiNO   {cost_marker(ca)}")
+        out.append(f"  DIR-B  PolyDOWN+KalshiYES {cost_marker(cb)}")
     else:
         out.append("waiting for data feeds...")
     out.append("-" * width)
 
-    # Open trades
-    out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
+    # Open trades — compact
     if OPEN_TRADES:
+        out.append(f"{ANSI_BOLD}OPEN ({len(OPEN_TRADES)}):{ANSI_RESET}")
         for tid, t in sorted(OPEN_TRADES.items()):
-            tier = t.get("tier", "")
-            tier_str = f"T{tier}" if tier else ""
-            out.append(f"  #{tid:>3} {tier_str:>3}  dir={t['direction']}  open={t['open_ts']}  "
-                       f"cost={t['cost']:.3f} ({t['profit_pct_open']:+.1f}%)  "
-                       f"poly@{t['poly_ask']:.3f} kalshi@{t['kalshi_ask']:.3f}  "
-                       f"slug={t['poly_slug'][-12:]}")
-    else:
-        out.append("  (none)")
+            tier_str = f"T{t.get('tier','')}" if t.get('tier') else ""
+            exp_profit = (1 - t['cost']) * t['invest_usd']
+            out.append(f"  #{tid:>3} {tier_str:>2} {t['direction']} cost={t['cost']:.3f} "
+                       f"({t['profit_pct_open']:+.1f}%) exp={color_money(exp_profit)} "
+                       f"poly@{t['poly_ask']:.2f} kalshi@{t['kalshi_ask']:.2f}")
     out.append("-" * width)
 
-    # Closed trades — last 10
+    # Last 5 closed trades — compact
     n_closed = len(CLOSED_TRADES)
-    out.append(f"{ANSI_BOLD}CLOSED TRADES: {n_closed} (last 10 below){ANSI_RESET}")
-    for t in CLOSED_TRADES[-10:]:
-        out.append(f"  #{t['trade_id']:>3}  dir={t['direction']}  paid=${t['invest_usd']:.0f}  "
-                   f"payout=${t['total_payout']:.2f}  PnL={color_money(t['pnl'])} "
-                   f"({t['pnl_pct']:+.1f}%)  [poly:{t['poly_winner']} kalshi:{t['kalshi_winner']}]")
-    out.append("=" * width)
+    if n_closed > 0:
+        out.append(f"{ANSI_BOLD}LAST 5 CLOSED:{ANSI_RESET}")
+        for t in CLOSED_TRADES[-5:]:
+            out.append(f"  #{t['trade_id']:>3} {t['direction']} PnL={color_money(t['pnl']):>14} "
+                       f"({t['pnl_pct']:+.0f}%)  [poly:{t['poly_winner']} kalshi:{t['kalshi_winner']}]")
+    out.append("-" * width)
 
     # Aggregates: today, this week, this month, all-time
     if CLOSED_TRADES:
@@ -408,15 +394,15 @@ def render_status(latest_k, latest_p):
         month_t = [t for t in CLOSED_TRADES if (parse_ts(t.get("poly_close_ts","")) or now_dt) >= month_start]
         all_t   = CLOSED_TRADES
 
-        out.append(f"{ANSI_BOLD}AGGREGATES:{ANSI_RESET}")
+        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET}")
         for label, sub in (("TODAY  ", today_t), ("WEEK   ", week_t), ("MONTH  ", month_t), ("ALLTIME", all_t)):
             n, w, l, p, inv, pnl = agg(sub)
             roi = (pnl/inv*100) if inv else 0
             wpct = (100*w/n) if n else 0
-            out.append(f"  {label}: trades={n:>4}  W={w:>3} L={l:>3} P={p:>3}  "
-                       f"({wpct:>3.0f}% win)  inv=${inv:>7.0f}  PnL={color_money(pnl)} ({roi:+.1f}%)")
+            out.append(f"  {label}  n={n:>3} W={w:>3} L={l:>3} ({wpct:>3.0f}%)  "
+                       f"inv=${inv:>6.0f}  PnL={color_money(pnl):>14}  ROI={roi:+5.1f}%")
     else:
-        out.append(f"{ANSI_BOLD}AGGREGATES:{ANSI_RESET} no closed trades yet")
+        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} no closed trades yet")
     out.append("Ctrl+C to stop.")
 
     sys_stdout = __import__("sys").stdout
