@@ -58,6 +58,11 @@ INVEST_PER_SIDE = 50.0
 TIER_COST_THRESHOLDS = [0.90, 0.85, 0.80]   # 10% / 15% / 20% profit
 MAX_STRIKE_DIFF = 50
 POLL_SEC = 2
+# Refuse to open trades when the data feed is stale (last row older than this)
+MAX_FEED_AGE_SEC = 30
+# Refuse extreme imbalanced trades — abs(poly_ask - kalshi_ask) must be <= this.
+# Empirical (19 trades, 05/05): kept trades made +$209, filtered ones made -$70.
+MAX_PRICE_GAP = 0.4
 
 OPEN_TRADES = {}  # trade_id -> trade dict
 NEXT_TRADE_ID = 1
@@ -345,21 +350,45 @@ def render_status(latest_k, latest_p):
                    f"({t['pnl_pct']:+.1f}%)  [poly:{t['poly_winner']} kalshi:{t['kalshi_winner']}]")
     out.append("=" * width)
 
-    # Totals
+    # Aggregates: today, this week, this month, all-time
     if CLOSED_TRADES:
-        total_invest = sum(t["invest_usd"] for t in CLOSED_TRADES)
-        total_payout = sum(t["total_payout"] for t in CLOSED_TRADES)
-        total_pnl = total_payout - total_invest
-        wins = sum(1 for t in CLOSED_TRADES if t["pnl"] > 0)
-        losses = sum(1 for t in CLOSED_TRADES if t["pnl"] < 0)
-        pushes = sum(1 for t in CLOSED_TRADES if abs(t["pnl"]) < 0.01)
-        win_pct = 100.0 * wins / n_closed if n_closed else 0
-        roi = (total_pnl / total_invest * 100) if total_invest else 0
-        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} trades={n_closed}  W={wins} L={losses} P={pushes} "
-                   f"({win_pct:.0f}% win)  invested=${total_invest:.0f}  "
-                   f"payout=${total_payout:.2f}  PnL={color_money(total_pnl)} ({roi:+.1f}%)")
+        from datetime import datetime as _dt, timedelta as _td
+        now_dt = _dt.now()
+        today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - _td(days=now_dt.weekday())  # Mon = start of week
+        month_start = today_start.replace(day=1)
+
+        def agg(filtered):
+            if not filtered:
+                return (0, 0, 0, 0, 0.0, 0.0)
+            n = len(filtered)
+            w = sum(1 for t in filtered if t["pnl"] > 0)
+            l = sum(1 for t in filtered if t["pnl"] < 0)
+            p = sum(1 for t in filtered if abs(t["pnl"]) < 0.01)
+            inv = sum(t["invest_usd"] for t in filtered)
+            pnl = sum(t["pnl"] for t in filtered)
+            return (n, w, l, p, inv, pnl)
+
+        def parse_ts(s):
+            try:
+                return _dt.strptime(s.split(".")[0], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return None
+
+        today_t = [t for t in CLOSED_TRADES if (parse_ts(t.get("poly_close_ts","")) or now_dt) >= today_start]
+        week_t  = [t for t in CLOSED_TRADES if (parse_ts(t.get("poly_close_ts","")) or now_dt) >= week_start]
+        month_t = [t for t in CLOSED_TRADES if (parse_ts(t.get("poly_close_ts","")) or now_dt) >= month_start]
+        all_t   = CLOSED_TRADES
+
+        out.append(f"{ANSI_BOLD}AGGREGATES:{ANSI_RESET}")
+        for label, sub in (("TODAY  ", today_t), ("WEEK   ", week_t), ("MONTH  ", month_t), ("ALLTIME", all_t)):
+            n, w, l, p, inv, pnl = agg(sub)
+            roi = (pnl/inv*100) if inv else 0
+            wpct = (100*w/n) if n else 0
+            out.append(f"  {label}: trades={n:>4}  W={w:>3} L={l:>3} P={p:>3}  "
+                       f"({wpct:>3.0f}% win)  inv=${inv:>7.0f}  PnL={color_money(pnl)} ({roi:+.1f}%)")
     else:
-        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} no closed trades yet")
+        out.append(f"{ANSI_BOLD}AGGREGATES:{ANSI_RESET} no closed trades yet")
     out.append("Ctrl+C to stop.")
 
     sys_stdout = __import__("sys").stdout
@@ -386,7 +415,13 @@ def main():
             k = parse_kalshi(tail_last_row(K, k_header))
             p = parse_poly(tail_last_row(P, p_header))
 
-            if k and p:
+            # Freshness check — refuse to open trades if either feed is stale
+            now_epoch = int(time.time())
+            k_age = now_epoch - k.get("epoch", 0) if k else 999
+            p_age = now_epoch - p.get("epoch", 0) if p else 999
+            feeds_fresh = k_age <= MAX_FEED_AGE_SEC and p_age <= MAX_FEED_AGE_SEC
+
+            if k and p and feeds_fresh:
                 strike_diff = (
                     abs(k["strike"] - p["tgt"])
                     if k["strike"] > 0 and p["tgt"] > 0
@@ -400,6 +435,9 @@ def main():
                     ("B", cost_b, p.get("da", 0), k.get("ya", 0)),
                 ]:
                     if cost <= 0 or cost >= 999 or strike_diff >= MAX_STRIKE_DIFF:
+                        continue
+                    # Skip extreme price imbalances — empirically these lose money
+                    if abs(poly_ask - kalshi_ask) > MAX_PRICE_GAP:
                         continue
                     market_id = (p["slug"], k["ticker"])
                     key = (direction, market_id)
