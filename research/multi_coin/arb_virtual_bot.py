@@ -204,6 +204,34 @@ def init_log():
             csv.writer(fh).writerow(cols)
 
 
+def load_existing_trades():
+    """Load existing settled trades from CSV into in-memory CLOSED_TRADES.
+    Lets aggregates show full history across restarts."""
+    global NEXT_TRADE_ID
+    if not os.path.exists(LOG):
+        return
+    try:
+        with open(LOG, newline="") as fh:
+            rd = csv.DictReader(fh)
+            for r in rd:
+                # Only count settled trades (those with non-empty pnl)
+                if not (r.get("pnl") or "").strip():
+                    continue
+                try:
+                    r["pnl"] = float(r["pnl"])
+                    r["pnl_pct"] = float(r.get("pnl_pct") or 0)
+                    r["invest_usd"] = float(r.get("invest_usd") or 0)
+                    r["total_payout"] = float(r.get("total_payout") or 0)
+                    r["trade_id"] = int(r.get("trade_id") or 0)
+                except Exception:
+                    continue
+                CLOSED_TRADES.append(r)
+                if r["trade_id"] >= NEXT_TRADE_ID:
+                    NEXT_TRADE_ID = r["trade_id"] + 1
+    except Exception as e:
+        print(f"warn: load_existing_trades failed: {e}")
+
+
 def settle_trade_if_ready(trade_id: int) -> bool:
     """Try to settle one open trade. Returns True if settled (and removed from OPEN_TRADES)."""
     t = OPEN_TRADES[trade_id]
@@ -406,6 +434,7 @@ def main():
         return
 
     init_log()
+    load_existing_trades()
 
     # Tiered entry tracking: per (direction, market_id), which tier indices were already opened.
     opened_tiers = {}  # (direction, (slug, ticker)) -> set(tier_index)
