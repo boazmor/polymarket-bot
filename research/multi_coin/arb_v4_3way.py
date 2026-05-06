@@ -44,15 +44,16 @@ K_PATH = "/root/data_kalshi_btc_15m/combined_per_second.csv"
 G_PATH = "/root/data_gemini_btc_15m/combined_per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v4_3way_trades.csv"
+MARKET_REPORT = "/root/arb_v4_market_report.csv"
 
 INVEST_PER_SIDE_TARGET = 50.0
 INVEST_PER_SIDE_MIN = 15.0
 DEPTH_USE_FRACTION = 0.5         # use 50% of min available depth
 COST_THRESHOLD_OPEN = 0.80       # primary open threshold (≥20% min profit)
 COST_THRESHOLD_COMPLETE = 0.85   # extended threshold when completing on 3rd
-MAX_STRIKE_GAP = 200             # don't trade if strikes differ by more than this
-COOLDOWN_SEC = 5
-MAX_TRADES_PER_MARKET = 15
+MAX_STRIKE_GAP = 9999            # effectively no limit — large gaps = more bonus-zone area (per user 06/05)
+COOLDOWN_SEC = 10                # 10s between opens on same (pair, market) per user request
+MAX_TRADES_PER_MARKET = 100      # generous safety cap, not meant to bind
 POLL_SEC = 2
 
 OPEN_TRADES: Dict[int, dict] = {}
@@ -262,16 +263,141 @@ TRADE_COLS = [
 ]
 
 
+MARKET_REPORT_COLS = [
+    "report_ts", "market_window_start", "market_window_end",
+    "poly_market", "poly_strike", "poly_winner_side",
+    "kalshi_market", "kalshi_strike", "kalshi_winner_side",
+    "gemini_market", "gemini_strike", "gemini_winner_side",
+    "btc_final_binance",
+    "n_trades_total", "n_trades_safe", "n_trades_dangerous",
+    "n_both_win_bonus", "n_both_lost_danger",
+    "total_invested", "total_pnl", "roi_pct",
+    "avg_cost_open", "avg_strike_gap",
+]
+
+
 def init_log():
     if not os.path.exists(LOG):
         with open(LOG, "w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerow(TRADE_COLS)
+    if not os.path.exists(MARKET_REPORT):
+        with open(MARKET_REPORT, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(MARKET_REPORT_COLS)
 
 
 def write_trade(t):
     row = [t.get(c, "") for c in TRADE_COLS]
     with open(LOG, "a", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(row)
+
+
+# Market reports: track which 15-min window is fully settled, then write a summary.
+# Window key = floor(epoch / 900). Each market gets one report row.
+REPORTED_WINDOWS = set()
+
+
+def emit_market_report(window_key: int):
+    """Aggregate all trades that closed in this 15-min window across all 3 platforms."""
+    if window_key in REPORTED_WINDOWS:
+        return
+    # Collect trades whose lower or higher market belongs to this window
+    window_start = window_key * 900
+    window_end = window_start + 900
+    trades_in_window = []
+    for t in CLOSED_TRADES:
+        # Use any leg's market epoch heuristic — fall back to close_ts
+        try:
+            ct = datetime.strptime(t.get("close_ts", ""), "%Y-%m-%d %H:%M:%S")
+            ce = int(ct.timestamp())
+        except Exception:
+            continue
+        # Match by close epoch falling in this window
+        if window_start <= ce < window_end + 60:  # +60 grace for late settles
+            trades_in_window.append(t)
+    if not trades_in_window:
+        return
+
+    # Aggregate
+    poly_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "POLY" else
+                    (float(t.get("down_strike") or 0) if t.get("down_platform") == "POLY" else 0)
+                    for t in trades_in_window]
+    poly_strikes = [s for s in poly_strikes if s > 0]
+    kal_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "KALSHI" else
+                   (float(t.get("down_strike") or 0) if t.get("down_platform") == "KALSHI" else 0)
+                   for t in trades_in_window]
+    kal_strikes = [s for s in kal_strikes if s > 0]
+    gem_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "GEMINI" else
+                   (float(t.get("down_strike") or 0) if t.get("down_platform") == "GEMINI" else 0)
+                   for t in trades_in_window]
+    gem_strikes = [s for s in gem_strikes if s > 0]
+
+    poly_market = next((t.get("up_market_id") if t.get("up_platform") == "POLY"
+                        else t.get("down_market_id") if t.get("down_platform") == "POLY" else None
+                        for t in trades_in_window), "")
+    kal_market = next((t.get("up_market_id") if t.get("up_platform") == "KALSHI"
+                       else t.get("down_market_id") if t.get("down_platform") == "KALSHI" else None
+                       for t in trades_in_window), "")
+    gem_market = next((t.get("up_market_id") if t.get("up_platform") == "GEMINI"
+                       else t.get("down_market_id") if t.get("down_platform") == "GEMINI" else None
+                       for t in trades_in_window), "")
+
+    poly_winner = lookup_poly_winner(poly_market) if poly_market else ""
+    kal_winner = lookup_kalshi_winner(kal_market) if kal_market else ""
+    gem_winner = lookup_gemini_winner(gem_market) if gem_market else ""
+
+    btc_final = ""
+    try:
+        with open(PM_OUTCOMES) as fh:
+            for r in csv.DictReader(fh):
+                if r.get("market_slug") == poly_market:
+                    btc_final = r.get("final_binance_price", "")
+                    break
+    except Exception:
+        pass
+
+    n_total = len(trades_in_window)
+    n_safe = sum(1 for t in trades_in_window if t.get("direction_safety") == "safe")
+    n_dangerous = n_total - n_safe
+    n_bonus = sum(1 for t in trades_in_window if t.get("winner_pattern") == "BOTH_WIN_BONUS")
+    n_lost_danger = sum(1 for t in trades_in_window if t.get("winner_pattern") == "BOTH_LOST_DANGER")
+    total_inv = sum(float(t.get("invest_total") or 0) for t in trades_in_window)
+    total_pnl = sum(float(t.get("pnl") or 0) for t in trades_in_window)
+    roi = total_pnl / total_inv * 100 if total_inv > 0 else 0
+    avg_cost = sum(float(t.get("cost_open") or 0) for t in trades_in_window) / n_total
+    avg_gap = sum(float(t.get("strike_gap") or 0) for t in trades_in_window) / n_total
+
+    row = {
+        "report_ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "market_window_start": datetime.utcfromtimestamp(window_start).strftime("%Y-%m-%d %H:%M:%S"),
+        "market_window_end": datetime.utcfromtimestamp(window_end).strftime("%Y-%m-%d %H:%M:%S"),
+        "poly_market": poly_market,
+        "poly_strike": round(poly_strikes[0], 2) if poly_strikes else "",
+        "poly_winner_side": poly_winner,
+        "kalshi_market": kal_market,
+        "kalshi_strike": round(kal_strikes[0], 2) if kal_strikes else "",
+        "kalshi_winner_side": kal_winner,
+        "gemini_market": gem_market,
+        "gemini_strike": round(gem_strikes[0], 2) if gem_strikes else "",
+        "gemini_winner_side": gem_winner,
+        "btc_final_binance": btc_final,
+        "n_trades_total": n_total,
+        "n_trades_safe": n_safe,
+        "n_trades_dangerous": n_dangerous,
+        "n_both_win_bonus": n_bonus,
+        "n_both_lost_danger": n_lost_danger,
+        "total_invested": round(total_inv, 2),
+        "total_pnl": round(total_pnl, 2),
+        "roi_pct": round(roi, 2),
+        "avg_cost_open": round(avg_cost, 4),
+        "avg_strike_gap": round(avg_gap, 2),
+    }
+    out_row = [row.get(c, "") for c in MARKET_REPORT_COLS]
+    with open(MARKET_REPORT, "a", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerow(out_row)
+    REPORTED_WINDOWS.add(window_key)
+    print(f"MARKET REPORT for window {row['market_window_start']}: "
+          f"{n_total} trades (safe={n_safe} danger={n_dangerous}), "
+          f"PnL=${total_pnl:+.2f} ROI={roi:+.1f}%")
 
 
 def lookup_poly_winner(market_id: str) -> Optional[str]:
@@ -575,6 +701,17 @@ def main():
             for tid in list(OPEN_TRADES.keys()):
                 if tid in OPEN_TRADES:
                     settle_trade(tid)
+            # Market report: trigger emit for any window that's >5min past close
+            # so we know all trades had time to settle.
+            now_epoch = int(time.time())
+            current_window = now_epoch // 900
+            for prev_window in [current_window - 1, current_window - 2]:
+                if prev_window in REPORTED_WINDOWS:
+                    continue
+                # Only emit once enough grace passed
+                window_end = (prev_window + 1) * 900
+                if now_epoch - window_end > 300:  # 5 min after window closed
+                    emit_market_report(prev_window)
             render_status(p, k, g, opps)
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}")
