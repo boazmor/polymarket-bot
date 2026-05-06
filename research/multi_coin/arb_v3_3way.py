@@ -147,13 +147,15 @@ def parse_gemini(row):
 def detect_spread_arb(p_data, k_data, g_data):
     """Iterate all 3 platform pairs; for each, identify lower/higher strike
     and compute spread arb cost (UP@lower + DOWN@higher).
+    For each opportunity, also record the THIRD platform as a backup-completion
+    source (in case live order is partially filled and we need to top up at
+    a similar price elsewhere).
     Returns list of opportunities sorted by best cost (lowest first)."""
     platforms = [x for x in [p_data, k_data, g_data] if x and x["strike"] > 0]
     opps = []
     for i in range(len(platforms)):
         for j in range(i + 1, len(platforms)):
             a, b = platforms[i], platforms[j]
-            # Identify lower-strike and higher-strike
             if a["strike"] < b["strike"]:
                 lower, higher = a, b
             else:
@@ -166,6 +168,31 @@ def detect_spread_arb(p_data, k_data, g_data):
             if up_ask <= 0 or down_ask <= 0 or up_ask >= 1 or down_ask >= 1:
                 continue
             cost = up_ask + down_ask
+            # Backup completion: the THIRD platform (the one not in this pair)
+            # If a leg can't be fully filled live, we can top up on the third platform.
+            # For UP@lower, backup must have strike ≤ lower (equal/better coverage).
+            # For DOWN@higher, backup must have strike ≥ higher (equal/better coverage).
+            third = next(
+                (p for p in platforms if p["platform"] not in (lower["platform"], higher["platform"])),
+                None,
+            )
+            lower_backup = None
+            higher_backup = None
+            if third:
+                if third["strike"] <= lower["strike"] and third["up_ask"] > 0:
+                    lower_backup = {
+                        "platform": third["platform"],
+                        "strike": third["strike"],
+                        "ask": third["up_ask"],
+                        "market_id": third["market_id"],
+                    }
+                if third["strike"] >= higher["strike"] and third["down_ask"] > 0:
+                    higher_backup = {
+                        "platform": third["platform"],
+                        "strike": third["strike"],
+                        "ask": third["down_ask"],
+                        "market_id": third["market_id"],
+                    }
             opps.append({
                 "pair_label": f"UP@{lower['platform']}+DOWN@{higher['platform']}",
                 "lower": lower,
@@ -174,6 +201,8 @@ def detect_spread_arb(p_data, k_data, g_data):
                 "up_ask": up_ask,
                 "down_ask": down_ask,
                 "cost": cost,
+                "lower_backup": lower_backup,
+                "higher_backup": higher_backup,
             })
     opps.sort(key=lambda o: o["cost"])
     return opps
@@ -202,6 +231,8 @@ def write_trade(t):
         "higher_platform", "higher_market_id", "higher_strike", "higher_down_ask",
         "strike_gap", "cost", "min_profit_pct",
         "lower_shares", "higher_shares", "invest_usd",
+        "lower_backup_platform", "lower_backup_strike", "lower_backup_ask",
+        "higher_backup_platform", "higher_backup_strike", "higher_backup_ask",
         "close_ts", "btc_final", "winner_pattern",
         "lower_payout", "higher_payout", "total_payout",
         "pnl", "pnl_pct", "notes",
@@ -377,6 +408,8 @@ def main():
                 invest = INVEST_PER_SIDE * 2
                 min_profit_pct = (1 - o["cost"]) * 100
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                lb = o.get("lower_backup")
+                hb = o.get("higher_backup")
                 OPEN_TRADES[NEXT_TRADE_ID] = {
                     "trade_id": NEXT_TRADE_ID,
                     "open_ts": open_ts,
@@ -395,6 +428,12 @@ def main():
                     "lower_shares": round(lower_shares, 4),
                     "higher_shares": round(higher_shares, 4),
                     "invest_usd": invest,
+                    "lower_backup_platform": lb["platform"] if lb else "",
+                    "lower_backup_strike": round(lb["strike"], 2) if lb else "",
+                    "lower_backup_ask": round(lb["ask"], 4) if lb else "",
+                    "higher_backup_platform": hb["platform"] if hb else "",
+                    "higher_backup_strike": round(hb["strike"], 2) if hb else "",
+                    "higher_backup_ask": round(hb["ask"], 4) if hb else "",
                 }
                 NEXT_TRADE_ID += 1
 
