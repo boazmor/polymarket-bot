@@ -45,11 +45,13 @@ PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 
 LOG = "/root/arb_v3_3way_trades.csv"
 
-INVEST_PER_SIDE = 50.0
-COST_THRESHOLD = 0.90       # ≥10% guaranteed profit
-MAX_STRIKE_GAP = 200        # don't trade if strikes too far apart (>$200)
+INVEST_PER_SIDE_TARGET = 50.0   # ideal per-side $; capped by liquidity
+INVEST_MIN = 5.0                # skip if depth too thin to invest at least this
+MAX_SHARES_PER_LEG = 500.0      # hard safety cap (prevents 10000-share virtual fills)
+COST_THRESHOLD = 0.90           # ≥10% guaranteed profit
+MAX_STRIKE_GAP = 200            # don't trade if strikes too far apart (>$200)
 POLL_SEC = 2
-COOLDOWN_SEC = 5            # min seconds between opens on same (pair, market)
+COOLDOWN_SEC = 5                # min seconds between opens on same (pair, market)
 
 OPEN_TRADES: Dict[int, dict] = {}
 CLOSED_TRADES = []
@@ -104,6 +106,8 @@ def parse_poly(row):
             "epoch": int(row.get("epoch_sec") or 0),
             "up_ask": float(row.get("up_ask") or 0),
             "down_ask": float(row.get("down_ask") or 0),
+            "up_usd_avail": float(row.get("up_usd_best") or 0),
+            "down_usd_avail": float(row.get("down_usd_best") or 0),
             "strike": float(row.get("target_chainlink_at_open") or 0),
             "market_id": row.get("market_slug", "") or "",
         }
@@ -115,11 +119,18 @@ def parse_kalshi(row):
     if not row:
         return None
     try:
+        ya = float(row.get("yes_ask") or 0)
+        na = float(row.get("no_ask") or 0)
+        ya_sz = float(row.get("yes_ask_size") or 0)
         return {
             "platform": "KALSHI",
             "epoch": int(row.get("epoch_sec") or 0),
-            "up_ask": float(row.get("yes_ask") or 0),  # YES = UP analog
-            "down_ask": float(row.get("no_ask") or 0),  # NO = DOWN analog
+            "up_ask": ya,           # YES = UP analog
+            "down_ask": na,         # NO = DOWN analog
+            "up_usd_avail": ya_sz * ya,
+            # Kalshi recorder doesn't capture no_ask_size; use yes_ask_size as proxy
+            # (NO depth roughly mirrors YES depth in a single book).
+            "down_usd_avail": ya_sz * na,
             "strike": float(row.get("floor_strike") or 0),
             "market_id": row.get("event_ticker", "") or "",
         }
@@ -131,12 +142,13 @@ def parse_gemini(row):
     if not row:
         return None
     try:
-        # Gemini: yes_ask is real, no_ask is implied (1 - yes_bid)
         return {
             "platform": "GEMINI",
             "epoch": int(row.get("epoch_sec") or 0),
             "up_ask": float(row.get("yes_ask") or 0),
             "down_ask": float(row.get("no_ask_implied") or 0),
+            "up_usd_avail": float(row.get("yes_ask_usd") or 0),
+            "down_usd_avail": float(row.get("no_ask_usd_buyable") or 0),
             "strike": float(row.get("strike") or 0),
             "market_id": row.get("ticker", "") or "",
         }
@@ -401,11 +413,35 @@ def main():
                 last_ts = LAST_OPEN_TS.get(cd_key, 0)
                 if now_unix - last_ts < COOLDOWN_SEC:
                     continue
+                # Liquidity sizing: never put in more than half the smaller leg's
+                # available depth, and apply a hard share cap to avoid the
+                # 10000-shares-at-half-a-cent virtual fill problem.
+                lower_avail = o["lower"].get("up_usd_avail", 0)
+                higher_avail = o["higher"].get("down_usd_avail", 0)
+                if lower_avail <= 0 or higher_avail <= 0:
+                    continue
+                min_avail = min(lower_avail, higher_avail)
+                if min_avail >= INVEST_PER_SIDE_TARGET * 2:
+                    invest_per_side = INVEST_PER_SIDE_TARGET
+                else:
+                    invest_per_side = min_avail / 2.0
+                if invest_per_side < INVEST_MIN:
+                    continue
+                # Compute shares; cap to MAX_SHARES_PER_LEG safety net
+                lower_shares = invest_per_side / o["up_ask"]
+                higher_shares = invest_per_side / o["down_ask"]
+                if lower_shares > MAX_SHARES_PER_LEG:
+                    lower_shares = MAX_SHARES_PER_LEG
+                    invest_per_side_lower = lower_shares * o["up_ask"]
+                else:
+                    invest_per_side_lower = invest_per_side
+                if higher_shares > MAX_SHARES_PER_LEG:
+                    higher_shares = MAX_SHARES_PER_LEG
+                    invest_per_side_higher = higher_shares * o["down_ask"]
+                else:
+                    invest_per_side_higher = invest_per_side
+                invest = invest_per_side_lower + invest_per_side_higher
                 LAST_OPEN_TS[cd_key] = now_unix
-                # Open trade
-                lower_shares = INVEST_PER_SIDE / o["up_ask"]
-                higher_shares = INVEST_PER_SIDE / o["down_ask"]
-                invest = INVEST_PER_SIDE * 2
                 min_profit_pct = (1 - o["cost"]) * 100
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 lb = o.get("lower_backup")
