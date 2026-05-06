@@ -559,9 +559,10 @@ def render_status(p, k, g, opps):
     width = 110
     out = ["\033[H\033[2J\033[3J\033[?25l"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    out.append(f"{ANSI_BOLD}ARB_V4_3WAY (Safe-direction + completion){ANSI_RESET}   "
+    out.append(f"{ANSI_BOLD}ARB_V4_3WAY (safe=unlimited / dangerous=throttled){ANSI_RESET}   "
                f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  "
-               f"target=${INVEST_PER_SIDE_TARGET:.0f}/side  cost_open<={COST_THRESHOLD_OPEN}")
+               f"${INVEST_PER_SIDE_TARGET:.0f}/side  cost<={COST_THRESHOLD_OPEN}  "
+               f"danger_cooldown={COOLDOWN_SEC}s")
     out.append("=" * width)
     out.append(f"TIME: {now}")
     out.append("")
@@ -639,10 +640,15 @@ def main():
                 pair_label = o["pair_label"]
                 market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
                 cd_key = (pair_label, market_combo)
-                if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
-                    continue
-                if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
-                    continue
+                # Safe direction is FREE — no cooldown, no per-market cap
+                # (per user 06/05: safe = UP from lower-strike + DOWN from higher-strike;
+                #  these are the trades we WANT to maximize because of bonus-zone upside)
+                # Dangerous direction is LIMITED to control double-loss exposure.
+                if o["direction_safety"] == "dangerous":
+                    if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
+                        continue
+                    if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
+                        continue
                 up_avail = o["leg_up"]["up_usd_avail"]
                 down_avail = o["leg_down"]["down_usd_avail"]
                 if up_avail <= 0 or down_avail <= 0:
@@ -664,8 +670,10 @@ def main():
                     continue
                 if final_u < 0.01:
                     continue
-                LAST_OPEN_TS[cd_key] = now_unix
-                MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
+                # Track timestamp/count only for dangerous direction (safe is unlimited)
+                if o["direction_safety"] == "dangerous":
+                    LAST_OPEN_TS[cd_key] = now_unix
+                    MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 third = o.get("third") or {}
                 # For STRIKE column purposes:
