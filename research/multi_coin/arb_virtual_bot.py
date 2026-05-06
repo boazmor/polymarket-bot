@@ -203,13 +203,15 @@ def write_trade_row(trade):
 def init_log():
     if not os.path.exists(LOG):
         cols = [
-            "trade_id", "open_ts", "direction", "poly_slug", "kalshi_ticker",
+            "trade_id", "open_ts", "direction", "direction_safety",
+            "poly_slug", "kalshi_ticker",
+            "poly_strike_open", "kalshi_strike_open",
             "poly_ask", "kalshi_ask", "cost", "profit_pct_open",
             "poly_shares", "kalshi_shares", "invest_usd",
             "poly_close_ts", "kalshi_close_ts",
             "poly_winner", "kalshi_winner",
             "poly_payout", "kalshi_payout", "total_payout",
-            "pnl", "pnl_pct", "notes",
+            "pnl", "pnl_pct", "winner_pattern", "notes",
         ]
         with open(LOG, "w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerow(cols)
@@ -244,35 +246,61 @@ def load_existing_trades():
 
 
 def settle_trade_if_ready(trade_id: int) -> bool:
-    """Try to settle one open trade. Returns True if settled (and removed from OPEN_TRADES)."""
+    """Try to settle one open trade using EACH platform's OWN oracle.
+    No fallback to Binance — if a platform hasn't published its outcome yet,
+    we wait. This is critical for accurate analysis ahead of going live."""
     t = OPEN_TRADES[trade_id]
     poly_winner, poly_final = lookup_poly_outcome(t["poly_slug"])
     if poly_winner is None:
         return False  # poly not settled yet
-    # Kalshi settle — check by status / last_price
-    kalshi_winner, kalshi_lp = lookup_kalshi_outcome(t["kalshi_ticker"], t.get("kalshi_market_ticker", ""), t.get("strike", 0))
+    kalshi_winner, kalshi_lp = lookup_kalshi_outcome(
+        t["kalshi_ticker"], t.get("kalshi_market_ticker", ""), t.get("strike", 0)
+    )
     if kalshi_winner is None:
-        # Fallback — derive from poly_final + strike
-        if poly_final and t.get("strike"):
-            kalshi_winner = "YES" if poly_final > t["strike"] else "NO"
-            kalshi_lp = 1.0 if kalshi_winner == "YES" else 0.0
-        else:
-            return False  # truly not settled
+        return False  # kalshi not settled yet — wait, do NOT fall back to poly's binance final
 
-    # Compute payouts
+    # Compute payouts based on each platform's INDEPENDENT outcome
     direction = t["direction"]
     poly_payout = 0.0
     kalshi_payout = 0.0
+    poly_won = False
+    kalshi_won = False
     if direction == "A":  # bought PolyUP + KalshiNO
-        if poly_winner == "UP":
+        poly_won = (poly_winner == "UP")
+        kalshi_won = (kalshi_winner == "NO")
+        if poly_won:
             poly_payout = t["poly_shares"] * 1.0
-        if kalshi_winner == "NO":
+        if kalshi_won:
             kalshi_payout = t["kalshi_shares"] * 1.0
     elif direction == "B":  # bought PolyDOWN + KalshiYES
-        if poly_winner == "DOWN":
+        poly_won = (poly_winner == "DOWN")
+        kalshi_won = (kalshi_winner == "YES")
+        if poly_won:
             poly_payout = t["poly_shares"] * 1.0
-        if kalshi_winner == "YES":
+        if kalshi_won:
             kalshi_payout = t["kalshi_shares"] * 1.0
+
+    # Tag winner pattern based on independent oracle results.
+    # Determine if THIS trade was in the safe direction (UP from lower-strike platform)
+    poly_strike = t.get("poly_strike_open", 0) or 0
+    kalshi_strike = t.get("kalshi_strike_open", 0) or t.get("strike", 0) or 0
+    is_safe = None
+    if poly_strike > 0 and kalshi_strike > 0:
+        if direction == "A":
+            # bought UP@poly + DOWN@kalshi — safe if poly_strike < kalshi_strike
+            is_safe = poly_strike < kalshi_strike
+        else:
+            # bought UP@kalshi + DOWN@poly — safe if kalshi_strike < poly_strike
+            is_safe = kalshi_strike < poly_strike
+
+    if poly_won and kalshi_won:
+        pattern = "BOTH_WIN_BONUS" if is_safe else "BOTH_WIN_UNEXPECTED"
+    elif poly_won and not kalshi_won:
+        pattern = "POLY_WON_ONLY"
+    elif not poly_won and kalshi_won:
+        pattern = "KALSHI_WON_ONLY"
+    else:
+        pattern = "BOTH_LOST_DANGER" if is_safe is False else "BOTH_LOST_UNEXPECTED"
 
     total_payout = poly_payout + kalshi_payout
     pnl = total_payout - t["invest_usd"]
@@ -289,10 +317,13 @@ def settle_trade_if_ready(trade_id: int) -> bool:
         "total_payout": round(total_payout, 4),
         "pnl": round(pnl, 4),
         "pnl_pct": round(pnl_pct, 2),
+        "winner_pattern": pattern,
+        "direction_safety": "safe" if is_safe is True else ("dangerous" if is_safe is False else "unknown"),
         "notes": "",
     })
     write_trade_row(t)
-    print(f"SETTLED trade #{trade_id} dir={direction} pnl=${pnl:+.2f} ({pnl_pct:+.1f}%) "
+    print(f"SETTLED trade #{trade_id} dir={direction} [{t['direction_safety']}] "
+          f"pattern={pattern} pnl=${pnl:+.2f} ({pnl_pct:+.1f}%) "
           f"[poly:{poly_winner} kalshi:{kalshi_winner}]")
     del OPEN_TRADES[trade_id]
     return True
@@ -498,6 +529,9 @@ def main():
                         "kalshi_ticker": k["ticker"],
                         "kalshi_market_ticker": k.get("market_ticker", ""),
                         "strike": k["strike"],
+                        # Both strike prices captured at open for safe/dangerous classification
+                        "poly_strike_open": round(p.get("tgt", 0), 2),
+                        "kalshi_strike_open": round(k.get("strike", 0), 2),
                         "poly_ask": round(poly_ask, 4),
                         "kalshi_ask": round(kalshi_ask, 4),
                         "cost": round(cost, 4),
