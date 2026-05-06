@@ -60,9 +60,8 @@ MAX_STRIKE_DIFF = 50
 POLL_SEC = 2
 # Refuse to open trades when the data feed is stale (last row older than this)
 MAX_FEED_AGE_SEC = 30
-# Refuse extreme imbalanced trades — abs(poly_ask - kalshi_ask) must be <= this.
-# Empirical (19 trades, 05/05): kept trades made +$209, filtered ones made -$70.
-MAX_PRICE_GAP = 0.4
+# Note: previous MAX_PRICE_GAP filter removed per user 06/05 — never approved.
+# We now accept all gap sizes; per-leg ask cap is enforced separately if needed.
 
 OPEN_TRADES = {}  # trade_id -> trade dict
 NEXT_TRADE_ID = 1
@@ -493,9 +492,6 @@ def main():
                         continue
                     # Cost gate
                     if cost > COST_THRESHOLD:
-                        continue
-                    # Skip extreme price imbalances — empirically these lose money
-                    if abs(poly_ask - kalshi_ask) > MAX_PRICE_GAP:
                         continue
                     # Depth-based sizing: target $100/side, but never take more
                     # than half the smaller side's available depth (avoid slippage).

@@ -48,12 +48,15 @@ MARKET_REPORT = "/root/arb_v4_market_report.csv"
 
 INVEST_PER_SIDE_TARGET = 50.0
 INVEST_PER_SIDE_MIN = 15.0
-DEPTH_USE_FRACTION = 0.5         # use 50% of min available depth
-COST_THRESHOLD_OPEN = 0.95       # PILOT MODE: take everything ≥5% profit (per user 06/05 evening)
-COST_THRESHOLD_COMPLETE = 0.97   # extended threshold when completing on 3rd
-MAX_STRIKE_GAP = 9999            # no strike gap limit
-COOLDOWN_SEC = 5                 # PILOT: lighter cooldown, all directions equal
-MAX_TRADES_PER_MARKET = 200      # PILOT: very generous, just safety
+DEPTH_USE_FRACTION = 0.5
+COST_THRESHOLD_NORMAL = 0.90        # base: ≥10% profit (per user)
+COST_THRESHOLD_AGGRESSIVE = 0.96    # safe direction + strike_gap >= 50 (more bonus area)
+COST_THRESHOLD_COMPLETE = 0.92      # used when completing missing leg on 3rd platform
+SINGLE_LEG_MAX_ASK = 0.80           # per-leg cap: never buy any leg priced above this
+DANGEROUS_GAP_BLOCK = 50            # block dangerous direction when strike_gap >= this
+AGGRESSIVE_GAP_THRESHOLD = 50       # safe direction uses aggressive threshold above this gap
+COOLDOWN_SEC_NORMAL = 10            # cooldown for non-safe trades
+MAX_TRADES_PER_MARKET = 0           # 0 = no cap (per user)
 POLL_SEC = 2
 
 OPEN_TRADES: Dict[int, dict] = {}
@@ -173,8 +176,6 @@ def detect_arb(platforms: List[dict]) -> List[dict]:
             else:
                 lower, higher = b, a
             strike_gap = higher["strike"] - lower["strike"]
-            if strike_gap > MAX_STRIKE_GAP:
-                continue
             third = next(
                 (p for p in valid if p["platform"] not in (lower["platform"], higher["platform"])),
                 None,
@@ -561,10 +562,11 @@ def render_status(p, k, g, opps):
     width = 110
     out = ["\033[H\033[2J\033[3J\033[?25l"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    out.append(f"{ANSI_BOLD}ARB_V4_3WAY (safe=unlimited / dangerous=throttled){ANSI_RESET}   "
-               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  "
-               f"${INVEST_PER_SIDE_TARGET:.0f}/side  cost<={COST_THRESHOLD_OPEN}  "
-               f"danger_cooldown={COOLDOWN_SEC}s")
+    out.append(f"{ANSI_BOLD}ARB_V4_3WAY (rules per user 06/05 evening){ANSI_RESET}   "
+               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  ${INVEST_PER_SIDE_TARGET:.0f}/side")
+    out.append(f"  rules: cost<={COST_THRESHOLD_NORMAL} normal | <={COST_THRESHOLD_AGGRESSIVE} "
+               f"if SAFE + gap>={AGGRESSIVE_GAP_THRESHOLD}$  |  per-leg<={SINGLE_LEG_MAX_ASK}  |  "
+               f"BLOCK dangerous when gap>={DANGEROUS_GAP_BLOCK}$")
     out.append("=" * width)
     out.append(f"TIME: {now}")
     out.append("")
@@ -581,15 +583,25 @@ def render_status(p, k, g, opps):
         out.append("  (waiting for all 3 feeds with valid strikes)")
     else:
         for o in opps:
-            mark = ""
-            if o["cost"] <= COST_THRESHOLD_OPEN:
-                mark = f"  {ANSI_GREEN}{ANSI_BOLD}<- OPEN{ANSI_RESET}"
-            elif o["cost"] <= COST_THRESHOLD_COMPLETE:
-                mark = f"  {ANSI_YELLOW}<- completion-only{ANSI_RESET}"
-            safety_tag = "[BTOC]" if o["direction_safety"] == "safe" else "[MSKN]"
+            is_safe = o["direction_safety"] == "safe"
+            gap = o["strike_gap"]
+            # Compute the live limit for this opp
+            if (not is_safe) and gap >= DANGEROUS_GAP_BLOCK:
+                live_limit = 0  # blocked
+            elif is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
+                live_limit = COST_THRESHOLD_AGGRESSIVE
+            else:
+                live_limit = COST_THRESHOLD_NORMAL
+            if live_limit == 0:
+                mark = f"  {ANSI_RED}<- BLOCKED (dangerous + gap>={DANGEROUS_GAP_BLOCK}){ANSI_RESET}"
+            elif o["cost"] <= live_limit and o["up_ask"] <= SINGLE_LEG_MAX_ASK and o["down_ask"] <= SINGLE_LEG_MAX_ASK:
+                mark = f"  {ANSI_GREEN}{ANSI_BOLD}<- OPEN (limit {live_limit}){ANSI_RESET}"
+            else:
+                mark = f"  (limit {live_limit})"
+            safety_tag = "[BTOC]" if is_safe else "[MSKN]"
             out.append(f"  {safety_tag} {o['pair_label']:<32} cost={o['cost']:.3f}  "
                        f"min_profit={(1-o['cost'])*100:+.1f}%  "
-                       f"strike_gap=${o['strike_gap']:.0f}{mark}")
+                       f"strike_gap=${gap:.0f}{mark}")
     out.append("-" * width)
     out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
     if OPEN_TRADES:
@@ -645,16 +657,35 @@ def main():
             opps = detect_arb([p, k, g])
             now_unix = time.time()
             for o in opps:
-                if o["cost"] > COST_THRESHOLD_OPEN:
+                is_safe = (o["direction_safety"] == "safe")
+                gap = o["strike_gap"]
+
+                # Per-leg cap — never buy any leg priced above this
+                if o["up_ask"] > SINGLE_LEG_MAX_ASK or o["down_ask"] > SINGLE_LEG_MAX_ASK:
                     continue
+
+                # Block dangerous direction when strike gap is large (high both-lose risk)
+                if (not is_safe) and gap >= DANGEROUS_GAP_BLOCK:
+                    continue
+
+                # Variable cost threshold: aggressive 0.96 for safe + large gap; normal 0.90 otherwise
+                if is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
+                    cost_limit = COST_THRESHOLD_AGGRESSIVE
+                else:
+                    cost_limit = COST_THRESHOLD_NORMAL
+                if o["cost"] > cost_limit:
+                    continue
+
                 pair_label = o["pair_label"]
                 market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
                 cd_key = (pair_label, market_combo)
-                # PILOT mode: same throttle for both safety classes (per user 06/05).
-                # Safety tag still recorded in CSV for later analysis.
-                if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
-                    continue
-                if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
+
+                # Cooldown only on non-safe trades; safe direction is unlimited
+                if not is_safe:
+                    if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC_NORMAL:
+                        continue
+                # Per-market cap (0 = disabled)
+                if MAX_TRADES_PER_MARKET > 0 and MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
                     continue
                 up_avail = o["leg_up"]["up_usd_avail"]
                 down_avail = o["leg_down"]["down_usd_avail"]
