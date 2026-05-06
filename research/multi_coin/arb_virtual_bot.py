@@ -137,15 +137,16 @@ def parse_poly(row):
 
 def lookup_poly_outcome(slug: str):
     """Read market_outcomes.csv to find the winner_side for a slug.
-    Returns (winner_side, final_price) or (None, None) if not found."""
+    Polymarket settles via Chainlink — the winner_side column reflects that.
+    Returns winner_side or None if not found."""
     try:
         with open(PM_OUTCOMES) as fh:
             for r in csv.DictReader(fh):
                 if r.get("market_slug") == slug:
-                    return r.get("winner_side", ""), float(r.get("final_binance_price") or 0)
+                    return r.get("winner_side", "") or None
     except Exception:
         pass
-    return None, None
+    return None
 
 
 def lookup_kalshi_outcome(ticker: str, market_ticker: str, strike: float):
@@ -183,37 +184,30 @@ def lookup_kalshi_outcome(ticker: str, market_ticker: str, strike: float):
         return None, None
 
 
+TRADE_COLS_V2 = [
+    "trade_id", "open_ts", "direction", "direction_safety",
+    "poly_slug", "kalshi_ticker",
+    "poly_strike_open", "kalshi_strike_open",
+    "poly_ask", "kalshi_ask", "cost", "profit_pct_open",
+    "poly_shares", "kalshi_shares", "invest_usd",
+    "poly_close_ts", "kalshi_close_ts",
+    "poly_winner", "kalshi_winner",
+    "poly_payout", "kalshi_payout", "total_payout",
+    "pnl", "pnl_pct", "winner_pattern", "notes",
+]
+
+
 def write_trade_row(trade):
     """Append a settled trade row to LOG."""
-    cols = [
-        "trade_id", "open_ts", "direction", "poly_slug", "kalshi_ticker",
-        "poly_ask", "kalshi_ask", "cost", "profit_pct_open",
-        "poly_shares", "kalshi_shares", "invest_usd",
-        "poly_close_ts", "kalshi_close_ts",
-        "poly_winner", "kalshi_winner",
-        "poly_payout", "kalshi_payout", "total_payout",
-        "pnl", "pnl_pct", "notes",
-    ]
-    row = [trade.get(c, "") for c in cols]
+    row = [trade.get(c, "") for c in TRADE_COLS_V2]
     with open(LOG, "a", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(row)
 
 
 def init_log():
     if not os.path.exists(LOG):
-        cols = [
-            "trade_id", "open_ts", "direction", "direction_safety",
-            "poly_slug", "kalshi_ticker",
-            "poly_strike_open", "kalshi_strike_open",
-            "poly_ask", "kalshi_ask", "cost", "profit_pct_open",
-            "poly_shares", "kalshi_shares", "invest_usd",
-            "poly_close_ts", "kalshi_close_ts",
-            "poly_winner", "kalshi_winner",
-            "poly_payout", "kalshi_payout", "total_payout",
-            "pnl", "pnl_pct", "winner_pattern", "notes",
-        ]
         with open(LOG, "w", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerow(cols)
+            csv.writer(fh).writerow(TRADE_COLS_V2)
 
 
 def load_existing_trades():
@@ -249,9 +243,9 @@ def settle_trade_if_ready(trade_id: int) -> bool:
     No fallback to Binance — if a platform hasn't published its outcome yet,
     we wait. This is critical for accurate analysis ahead of going live."""
     t = OPEN_TRADES[trade_id]
-    poly_winner, poly_final = lookup_poly_outcome(t["poly_slug"])
+    poly_winner = lookup_poly_outcome(t["poly_slug"])
     if poly_winner is None:
-        return False  # poly not settled yet
+        return False  # poly not settled yet (Chainlink result not in market_outcomes.csv)
     kalshi_winner, kalshi_lp = lookup_kalshi_outcome(
         t["kalshi_ticker"], t.get("kalshi_market_ticker", ""), t.get("strike", 0)
     )
@@ -512,9 +506,14 @@ def main():
 
                     last_open_ts[key] = time.time()
                     market_trade_count[market_id] = market_trade_count.get(market_id, 0) + 1
-                    poly_shares = invest_per_side / poly_ask
-                    kalshi_shares = invest_per_side / kalshi_ask
-                    invest = invest_per_side * 2
+                    # SYMMETRIC SHARES: same share count on each leg, sized so the more
+                    # expensive leg fits within invest_per_side (avoids the asymmetric-
+                    # dollar bug that allowed the cheap-side wins to underweight us).
+                    max_price = max(poly_ask, kalshi_ask)
+                    shares = invest_per_side / max_price
+                    poly_shares = shares
+                    kalshi_shares = shares
+                    invest = shares * (poly_ask + kalshi_ask)
                     profit_pct_open = (1.0 - cost) * 100
                     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     OPEN_TRADES[NEXT_TRADE_ID] = {

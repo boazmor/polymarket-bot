@@ -46,7 +46,7 @@ PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v4_3way_trades.csv"
 MARKET_REPORT = "/root/arb_v4_market_report.csv"
 
-INVEST_PER_SIDE_TARGET = 50.0
+INVEST_PER_SIDE_TARGET = 100.0   # per user 06/05: $100 per side ideal
 INVEST_PER_SIDE_MIN = 15.0
 DEPTH_USE_FRACTION = 0.5
 COST_THRESHOLD_NORMAL = 0.90        # base: ≥10% profit (per user)
@@ -251,6 +251,9 @@ def attempt_completion(target_shares: float, up_filled: float, down_filled: floa
 
 TRADE_COLS = [
     "trade_id", "open_ts", "pair_label", "direction_safety",
+    # is_shadow=1 means dangerous direction — NOT actually traded, just tracked
+    # for analysis. Filter by this column to separate real vs theoretical PnL.
+    "is_shadow",
     # All 3 platform strikes captured at open time, regardless of which is in the trade
     "poly_strike_open", "kalshi_strike_open", "gemini_strike_open",
     "up_platform", "up_market_id", "up_strike", "up_ask",
@@ -627,14 +630,37 @@ def render_status(p, k, g, opps):
         def _f(v):
             try: return float(v or 0)
             except: return 0.0
-        total_inv = sum(_f(t.get("invest_total")) for t in CLOSED_TRADES)
-        total_pay = sum(_f(t.get("total_payout")) for t in CLOSED_TRADES)
-        total_pnl = total_pay - total_inv
-        wins = sum(1 for t in CLOSED_TRADES if _f(t.get("pnl")) > 0)
-        bonus = sum(1 for t in CLOSED_TRADES if "BOTH_WIN" in t.get("winner_pattern", ""))
-        roi = (total_pnl / total_inv * 100) if total_inv else 0
-        out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} {n} trades  W={wins}  bonus_zone={bonus}  "
-                   f"invested=${total_inv:.0f}  PnL={color_money(total_pnl)} ({roi:+.1f}%)")
+        # Split real vs shadow
+        real = [t for t in CLOSED_TRADES if t.get("is_shadow", 0) in (0, "0", "")]
+        shadow = [t for t in CLOSED_TRADES if t.get("is_shadow", 0) in (1, "1")]
+
+        def _agg(rows):
+            inv = sum(_f(t.get("invest_total")) for t in rows)
+            pay = sum(_f(t.get("total_payout")) for t in rows)
+            pnl = pay - inv
+            w = sum(1 for t in rows if _f(t.get("pnl")) > 0)
+            l = sum(1 for t in rows if _f(t.get("pnl")) < 0)
+            bonus = sum(1 for t in rows if "BOTH_WIN" in t.get("winner_pattern", ""))
+            both_lost = sum(1 for t in rows if "BOTH_LOST" in t.get("winner_pattern", ""))
+            return len(rows), w, l, inv, pnl, bonus, both_lost
+
+        n_r, w_r, l_r, inv_r, pnl_r, bonus_r, lost_r = _agg(real)
+        n_s, w_s, l_s, inv_s, pnl_s, bonus_s, lost_s = _agg(shadow)
+
+        out.append(f"{ANSI_BOLD}אמיתי (כיוון בטוח, נסחר):{ANSI_RESET}")
+        if n_r > 0:
+            roi_r = pnl_r/inv_r*100 if inv_r else 0
+            out.append(f"  עסקאות={n_r}  W={w_r} L={l_r}  בונוס={bonus_r}  "
+                       f"השקעה=${inv_r:.0f}  PnL={color_money(pnl_r)} ({roi_r:+.1f}%)")
+        else:
+            out.append("  אין עסקאות סגורות")
+        out.append(f"{ANSI_BOLD}צל (כיוון מסוכן, רק לניתוח):{ANSI_RESET}")
+        if n_s > 0:
+            roi_s = pnl_s/inv_s*100 if inv_s else 0
+            out.append(f"  עסקאות={n_s}  W={w_s} L={l_s}  שניהם הפסידו={lost_s}  "
+                       f"השקעה_תיאורטית=${inv_s:.0f}  PnL_תיאורטי={color_money(pnl_s)} ({roi_s:+.1f}%)")
+        else:
+            out.append("  אין עסקאות צל סגורות")
     out.append("Ctrl+C to stop.")
     sys.stdout.write("\n".join(out) + "\n")
     sys.stdout.flush()
@@ -660,13 +686,12 @@ def main():
                 is_safe = (o["direction_safety"] == "safe")
                 gap = o["strike_gap"]
 
-                # Per-leg cap — never buy any leg priced above this
+                # Per-leg cap (applies to both real and shadow)
                 if o["up_ask"] > SINGLE_LEG_MAX_ASK or o["down_ask"] > SINGLE_LEG_MAX_ASK:
                     continue
 
-                # Block dangerous direction when strike gap is large (high both-lose risk)
-                if (not is_safe) and gap >= DANGEROUS_GAP_BLOCK:
-                    continue
+                # Dangerous direction = SHADOW (tracked but not actually traded)
+                is_shadow = (not is_safe)
 
                 # Variable cost threshold: aggressive 0.96 for safe + large gap; normal 0.90 otherwise
                 if is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
@@ -680,8 +705,8 @@ def main():
                 market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
                 cd_key = (pair_label, market_combo)
 
-                # Cooldown only on non-safe trades; safe direction is unlimited
-                if not is_safe:
+                # Throttle ONLY shadow (dangerous). Real safe trades are unlimited.
+                if is_shadow:
                     if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC_NORMAL:
                         continue
                 # Per-market cap (0 = disabled)
@@ -712,14 +737,12 @@ def main():
                 MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 third = o.get("third") or {}
-                # For STRIKE column purposes:
-                #   Safe direction: up leg has lower strike, down leg has higher strike
-                #   Dangerous: opposite
                 OPEN_TRADES[NEXT_TRADE_ID] = {
                     "trade_id": NEXT_TRADE_ID,
                     "open_ts": open_ts,
                     "pair_label": pair_label,
                     "direction_safety": o["direction_safety"],
+                    "is_shadow": 1 if is_shadow else 0,
                     "poly_strike_open": round(p["strike"], 2) if p else "",
                     "kalshi_strike_open": round(k["strike"], 2) if k else "",
                     "gemini_strike_open": round(g["strike"], 2) if g else "",
