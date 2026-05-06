@@ -49,11 +49,11 @@ MARKET_REPORT = "/root/arb_v4_market_report.csv"
 INVEST_PER_SIDE_TARGET = 50.0
 INVEST_PER_SIDE_MIN = 15.0
 DEPTH_USE_FRACTION = 0.5         # use 50% of min available depth
-COST_THRESHOLD_OPEN = 0.80       # primary open threshold (≥20% min profit)
-COST_THRESHOLD_COMPLETE = 0.85   # extended threshold when completing on 3rd
-MAX_STRIKE_GAP = 9999            # effectively no limit — large gaps = more bonus-zone area (per user 06/05)
-COOLDOWN_SEC = 10                # 10s between opens on same (pair, market) per user request
-MAX_TRADES_PER_MARKET = 100      # generous safety cap, not meant to bind
+COST_THRESHOLD_OPEN = 0.95       # PILOT MODE: take everything ≥5% profit (per user 06/05 evening)
+COST_THRESHOLD_COMPLETE = 0.97   # extended threshold when completing on 3rd
+MAX_STRIKE_GAP = 9999            # no strike gap limit
+COOLDOWN_SEC = 5                 # PILOT: lighter cooldown, all directions equal
+MAX_TRADES_PER_MARKET = 200      # PILOT: very generous, just safety
 POLL_SEC = 2
 
 OPEN_TRADES: Dict[int, dict] = {}
@@ -602,15 +602,23 @@ def render_status(p, k, g, opps):
     n = len(CLOSED_TRADES)
     out.append(f"{ANSI_BOLD}CLOSED: {n} (last 8){ANSI_RESET}")
     for t in CLOSED_TRADES[-8:]:
-        out.append(f"  #{t['trade_id']:>3} {t['pair_label']:<32} "
-                   f"BTC=${t.get('btc_final', 0):>9,.0f}  {t.get('winner_pattern',''):<20}  "
-                   f"PnL={color_money(t.get('pnl', 0))} ({t.get('pnl_pct',0):+.1f}%)")
+        try:
+            pnl_val = float(t.get("pnl", 0) or 0)
+            pnl_pct_val = float(t.get("pnl_pct", 0) or 0)
+        except Exception:
+            pnl_val = 0.0; pnl_pct_val = 0.0
+        out.append(f"  #{t['trade_id']:>3} [{t.get('direction_safety','?'):<9}] {t['pair_label']:<32} "
+                   f"{t.get('winner_pattern',''):<20}  "
+                   f"PnL={color_money(pnl_val)} ({pnl_pct_val:+.1f}%)")
     out.append("=" * width)
     if CLOSED_TRADES:
-        total_inv = sum(t["invest_total"] for t in CLOSED_TRADES)
-        total_pay = sum(t["total_payout"] for t in CLOSED_TRADES)
+        def _f(v):
+            try: return float(v or 0)
+            except: return 0.0
+        total_inv = sum(_f(t.get("invest_total")) for t in CLOSED_TRADES)
+        total_pay = sum(_f(t.get("total_payout")) for t in CLOSED_TRADES)
         total_pnl = total_pay - total_inv
-        wins = sum(1 for t in CLOSED_TRADES if t.get("pnl", 0) > 0)
+        wins = sum(1 for t in CLOSED_TRADES if _f(t.get("pnl")) > 0)
         bonus = sum(1 for t in CLOSED_TRADES if "BOTH_WIN" in t.get("winner_pattern", ""))
         roi = (total_pnl / total_inv * 100) if total_inv else 0
         out.append(f"{ANSI_BOLD}TOTALS:{ANSI_RESET} {n} trades  W={wins}  bonus_zone={bonus}  "
@@ -642,15 +650,12 @@ def main():
                 pair_label = o["pair_label"]
                 market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
                 cd_key = (pair_label, market_combo)
-                # Safe direction is FREE — no cooldown, no per-market cap
-                # (per user 06/05: safe = UP from lower-strike + DOWN from higher-strike;
-                #  these are the trades we WANT to maximize because of bonus-zone upside)
-                # Dangerous direction is LIMITED to control double-loss exposure.
-                if o["direction_safety"] == "dangerous":
-                    if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
-                        continue
-                    if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
-                        continue
+                # PILOT mode: same throttle for both safety classes (per user 06/05).
+                # Safety tag still recorded in CSV for later analysis.
+                if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
+                    continue
+                if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
+                    continue
                 up_avail = o["leg_up"]["up_usd_avail"]
                 down_avail = o["leg_down"]["down_usd_avail"]
                 if up_avail <= 0 or down_avail <= 0:
@@ -672,10 +677,8 @@ def main():
                     continue
                 if final_u < 0.01:
                     continue
-                # Track timestamp/count only for dangerous direction (safe is unlimited)
-                if o["direction_safety"] == "dangerous":
-                    LAST_OPEN_TS[cd_key] = now_unix
-                    MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
+                LAST_OPEN_TS[cd_key] = now_unix
+                MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 third = o.get("third") or {}
                 # For STRIKE column purposes:
