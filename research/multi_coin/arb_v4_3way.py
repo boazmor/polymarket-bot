@@ -281,52 +281,152 @@ def write_trade(t):
         csv.writer(fh).writerow(row)
 
 
-def lookup_btc_final(market_id: str) -> Optional[float]:
+def lookup_poly_winner(market_id: str) -> Optional[str]:
+    """Returns 'UP', 'DOWN', or None. Polymarket settles by Chainlink."""
     try:
         with open(PM_OUTCOMES) as fh:
             for r in csv.DictReader(fh):
                 if r.get("market_slug") == market_id:
-                    fp = r.get("final_binance_price")
-                    if fp:
-                        return float(fp)
+                    return r.get("winner_side") or None
     except Exception:
         pass
     return None
 
 
+def lookup_kalshi_winner(market_ticker: str) -> Optional[str]:
+    """Returns 'YES', 'NO', or None. Kalshi settles by their oracle.
+    After settlement, last_price snaps to ~1.00 (YES won) or ~0.00 (NO won)."""
+    try:
+        out = subprocess.run(
+            ["tail", "-n", "5000", K_PATH], capture_output=True, text=True, timeout=10
+        )
+        if not out.stdout:
+            return None
+        header = read_header(K_PATH)
+        if not header:
+            return None
+        for line in reversed(out.stdout.strip().split("\n")):
+            values = line.split(",")
+            if len(values) < len(header):
+                continue
+            row = dict(zip(header, values))
+            if row.get("market_ticker") != market_ticker:
+                continue
+            try:
+                lp = float(row.get("last_price") or 0)
+            except Exception:
+                continue
+            if lp >= 0.99:
+                return "YES"
+            if lp <= 0.01:
+                return "NO"
+            if row.get("status", "").lower() in ("settled", "final", "finalized"):
+                return "YES" if lp >= 0.5 else "NO"
+        return None
+    except Exception:
+        return None
+
+
+def lookup_gemini_winner(ticker: str) -> Optional[str]:
+    """Returns 'YES', 'NO', or None. Gemini settles by Kaiko index.
+    After settlement, last_trade_price snaps to 1.00 (YES won) or 0.00 (NO won)."""
+    try:
+        out = subprocess.run(
+            ["tail", "-n", "5000", G_PATH], capture_output=True, text=True, timeout=10
+        )
+        if not out.stdout:
+            return None
+        header = read_header(G_PATH)
+        if not header:
+            return None
+        for line in reversed(out.stdout.strip().split("\n")):
+            values = line.split(",")
+            if len(values) < len(header):
+                continue
+            row = dict(zip(header, values))
+            if row.get("ticker") != ticker:
+                continue
+            try:
+                lp = float(row.get("last_trade_price") or 0)
+            except Exception:
+                continue
+            if lp >= 0.99:
+                return "YES"
+            if lp <= 0.01:
+                return "NO"
+            if row.get("status", "").lower() in ("settled", "final", "finalized", "closed"):
+                return "YES" if lp >= 0.5 else "NO"
+        return None
+    except Exception:
+        return None
+
+
+def winner_for_platform(platform: str, market_id: str, side: str) -> Optional[bool]:
+    """side: 'UP' if we bought UP/YES; 'DOWN' if we bought DOWN/NO.
+    Returns True if our side won, False if it lost, None if not yet settled."""
+    if platform == "POLY":
+        winner = lookup_poly_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "UP" and side == "UP") or (winner == "DOWN" and side == "DOWN")
+    if platform == "KALSHI":
+        winner = lookup_kalshi_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "YES" and side == "UP") or (winner == "NO" and side == "DOWN")
+    if platform == "GEMINI":
+        winner = lookup_gemini_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "YES" and side == "UP") or (winner == "NO" and side == "DOWN")
+    return None
+
+
 def settle_trade(tid: int) -> bool:
-    """Settle using BTC final price from Polymarket's outcomes (Binance-derived)."""
+    """Settle using EACH platform's OWN oracle independently.
+    Lower leg = bought UP on lower-strike platform.
+    Higher leg = bought DOWN on higher-strike platform.
+    Third platform completions are tracked side-by-side with their original legs."""
     t = OPEN_TRADES[tid]
-    btc_final = (lookup_btc_final(t.get("lower_market_id", ""))
-                 or lookup_btc_final(t.get("higher_market_id", "")))
-    if btc_final is None:
-        return False
-    lower_strike = t["lower_strike"]
-    higher_strike = t["higher_strike"]
-    if btc_final < lower_strike:
-        lower_won = False
-        higher_won = True
-        pattern = "BTC<low"
-    elif btc_final > higher_strike:
-        lower_won = True
-        higher_won = False
-        pattern = "BTC>high"
+
+    # Lower leg won = lower platform's own oracle says BTC ended above their strike
+    lower_won = winner_for_platform(t["lower_platform"], t["lower_market_id"], "UP")
+    higher_won = winner_for_platform(t["higher_platform"], t["higher_market_id"], "DOWN")
+    if lower_won is None or higher_won is None:
+        return False  # not yet settled on at least one platform
+
+    # Third-platform completion winners depend on side (UP completion or DOWN completion)
+    third_lower_won = None
+    third_higher_won = None
+    if t.get("third_lower_shares", 0) > 0 and t.get("third_platform"):
+        # Need third platform's market_id — we don't have it stored explicitly,
+        # use the pattern: third platform's market for this 15-min window
+        third_lower_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "UP")
+    if t.get("third_higher_shares", 0) > 0 and t.get("third_platform"):
+        third_higher_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "DOWN")
+
+    # Determine pattern based on independent oracle results
+    if lower_won and higher_won:
+        pattern = "BOTH_WIN_BONUS"
+    elif lower_won and not higher_won:
+        pattern = "ONLY_LOWER_WON"
+    elif not lower_won and higher_won:
+        pattern = "ONLY_HIGHER_WON"
     else:
-        lower_won = True
-        higher_won = True
-        pattern = "BTC_mid_BOTH_WIN"
+        pattern = "BOTH_LOST_DANGER"
+
     lower_pay = t["lower_shares_filled"] if lower_won else 0.0
     higher_pay = t["higher_shares_filled"] if higher_won else 0.0
-    # Third-platform completions are SAME side as their respective shorted leg
-    third_lower_pay = t["third_lower_shares"] if lower_won else 0.0
-    third_higher_pay = t["third_higher_shares"] if higher_won else 0.0
+    third_lower_pay = t.get("third_lower_shares", 0) if (third_lower_won is True) else 0.0
+    third_higher_pay = t.get("third_higher_shares", 0) if (third_higher_won is True) else 0.0
     total = lower_pay + higher_pay + third_lower_pay + third_higher_pay
     pnl = total - t["invest_total"]
     pnl_pct = (pnl / t["invest_total"]) * 100 if t["invest_total"] else 0
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     t.update({
         "close_ts": now_ts,
-        "btc_final": round(btc_final, 2),
+        # btc_final placeholder — not directly used now since each platform independent
+        "btc_final": "",
         "winner_pattern": pattern,
         "lower_payout": round(lower_pay, 4),
         "higher_payout": round(higher_pay, 4),
@@ -473,6 +573,7 @@ def main():
                     "higher_down_ask": round(o["down_ask"], 4),
                     "third_platform": third.get("platform", ""),
                     "third_strike": third.get("strike", ""),
+                    "third_market_id": third.get("market_id", ""),
                     "strike_gap": round(o["strike_gap"], 2),
                     "cost_open": round(o["cost"], 4),
                     "target_shares": round(target_shares, 4),
