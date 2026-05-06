@@ -250,6 +250,8 @@ def attempt_completion(target_shares: float, up_filled: float, down_filled: floa
 
 TRADE_COLS = [
     "trade_id", "open_ts", "pair_label", "direction_safety",
+    # All 3 platform strikes captured at open time, regardless of which is in the trade
+    "poly_strike_open", "kalshi_strike_open", "gemini_strike_open",
     "up_platform", "up_market_id", "up_strike", "up_ask",
     "down_platform", "down_market_id", "down_strike", "down_ask",
     "third_platform", "third_market_id", "third_strike",
@@ -684,6 +686,9 @@ def main():
                     "open_ts": open_ts,
                     "pair_label": pair_label,
                     "direction_safety": o["direction_safety"],
+                    "poly_strike_open": round(p["strike"], 2) if p else "",
+                    "kalshi_strike_open": round(k["strike"], 2) if k else "",
+                    "gemini_strike_open": round(g["strike"], 2) if g else "",
                     "up_platform": o["leg_up"]["platform"],
                     "up_market_id": o["leg_up"]["market_id"],
                     "up_strike": o["leg_up"]["strike"],
