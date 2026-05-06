@@ -30,11 +30,12 @@ from datetime import datetime
 from typing import Optional, Dict
 
 WS_URL = "wss://ws.predict.fun/ws"
-DATA_DIR = "/root/data_predict_btc_15m"
+DATA_DIR = "/root/data_predict_btc_15m"   # default; can be overridden via CLI
 POLL_INTERVAL_SEC = 1.0
 DISCOVERY_INTERVAL_SEC = 30
 INACTIVE_THRESHOLD_SEC = 120  # if no orderbook update for 2 minutes, market closed
 MIN_ORDER_COUNT = 5           # minimum orders to consider a market active
+RANK = 1                      # 1=pick highest marketId, 2=pick second-highest, etc.
 
 SHOULD_STOP = False
 
@@ -174,9 +175,11 @@ def select_active_market() -> Optional[int]:
 
     if not candidates:
         return None
-    # Pick highest marketId (newest market = current BTC 15-min)
+    # Sort by marketId DESCENDING; pick the Nth-ranked one (1-indexed)
     candidates.sort(key=lambda x: -x[0])
-    return candidates[0][0]
+    if RANK > len(candidates):
+        return None
+    return candidates[RANK - 1][0]
 
 
 async def discovery_loop(csvs):
@@ -285,6 +288,13 @@ async def main_async():
 
 
 def main():
+    global DATA_DIR, RANK
+    p = argparse.ArgumentParser()
+    p.add_argument("--data-dir", default=DATA_DIR)
+    p.add_argument("--rank", type=int, default=1, help="1=highest marketId, 2=second, ...")
+    args = p.parse_args()
+    DATA_DIR = args.data_dir
+    RANK = args.rank
     setup_signals()
     asyncio.run(main_async())
 
