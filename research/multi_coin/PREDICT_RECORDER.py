@@ -2,31 +2,19 @@
 """
 PREDICT_RECORDER.py — Predict.fun BTC 15-minute market recorder.
 
-Subscribes to public WebSocket (no auth needed) at wss://ws.predict.fun/ws
-and records orderbook snapshots per second for the currently-active BTC
-15-minute market.
-
-The bot discovers the active BTC market by listening to predictTrades/*
-and identifying markets with the highest activity matching BTC volume.
-For now, this version takes the marketId on the command line; we'll
-auto-discover in v2.
+Auto-discovers the most active BTC 15-min market by:
+  1. Subscribing to predictOrderbook/* (all markets)
+  2. Tracking activity per market (orderCount, last update)
+  3. Selecting the market with highest activity that matches BTC pattern
+  4. Auto-rolling over when current market becomes inactive
 
 Output: data_predict_btc_15m/
-  combined_per_second.csv — tick-by-tick orderbook snapshot
-  events.csv              — subscribe events, market changes, errors
-
-The orderbook format from Predict.fun:
-  bids: [[price, size], ...]   — orders to BUY YES
-  asks: [[price, size], ...]   — orders to SELL YES = orders to BUY NO at (1-price)
-
-So:
-  yes_ask = bids best price's complement? NO — yes_ask = asks best price (we buy YES)
-  yes_bid = bids best price (someone willing to buy YES from us)
-  no_ask  = 1 - yes_bid (to buy NO we sell YES at bid)
-  no_bid  = 1 - yes_ask
+  combined_per_second.csv — tick-by-tick orderbook of currently-tracked market
+  events.csv              — discovery, rollover, errors
+  markets.csv             — log of every market we've recorded
 
 Run:
-  python3 PREDICT_RECORDER.py --market-id 285689
+  python3 PREDICT_RECORDER.py
 """
 
 import argparse
@@ -39,15 +27,23 @@ import sys
 import time
 import websockets
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 
 WS_URL = "wss://ws.predict.fun/ws"
 DATA_DIR = "/root/data_predict_btc_15m"
 POLL_INTERVAL_SEC = 1.0
+DISCOVERY_INTERVAL_SEC = 30
+INACTIVE_THRESHOLD_SEC = 120  # if no orderbook update for 2 minutes, market closed
+MIN_ORDER_COUNT = 5           # minimum orders to consider a market active
 
 SHOULD_STOP = False
-LATEST_OB = None  # latest orderbook from WS
-LAST_OB_TS = 0.0
+
+# Per-market state from WS — keyed by marketId
+MARKETS: Dict[int, dict] = {}        # marketId -> latest orderbook data
+LAST_UPDATE: Dict[int, float] = {}   # marketId -> last update epoch
+
+CURRENT_MARKET_ID: Optional[int] = None
+CURRENT_MARKET_SINCE: Optional[float] = None
 
 
 def now_local():
@@ -73,6 +69,7 @@ class CsvStore:
         os.makedirs(self.data_dir, exist_ok=True)
         self.combined = os.path.join(self.data_dir, "combined_per_second.csv")
         self.events = os.path.join(self.data_dir, "events.csv")
+        self.markets = os.path.join(self.data_dir, "markets.csv")
         self._init_if_missing(self.combined, [
             "local_ts", "epoch_sec",
             "market_id",
@@ -85,6 +82,7 @@ class CsvStore:
             "ws_age_sec",
         ])
         self._init_if_missing(self.events, ["local_ts", "event", "detail"])
+        self._init_if_missing(self.markets, ["local_ts", "market_id", "first_seen_ts", "order_count_at_select"])
 
     @staticmethod
     def _init_if_missing(path, headers):
@@ -100,17 +98,20 @@ class CsvStore:
         with open(self.combined, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(row)
 
+    def market_picked(self, market_id, order_count):
+        with open(self.markets, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([now_local(), market_id, now_epoch(), order_count])
 
-async def ws_listener(market_id, csvs):
-    """Connect to WS and keep LATEST_OB updated."""
-    global LATEST_OB, LAST_OB_TS
+
+async def ws_listener(csvs):
+    """Connect to WS and keep MARKETS dict updated for ALL active markets."""
     while not SHOULD_STOP:
         try:
             async with websockets.connect(WS_URL, open_timeout=10, ping_interval=20) as ws:
-                # Subscribe to orderbook for the specific market
-                req = {"method": "subscribe", "requestId": 1, "params": [f"predictOrderbook/{market_id}"]}
+                # Subscribe to ALL orderbooks
+                req = {"method": "subscribe", "requestId": 1, "params": ["predictOrderbook/*"]}
                 await ws.send(json.dumps(req))
-                csvs.event("WS_CONNECT", f"subscribed to predictOrderbook/{market_id}")
+                csvs.event("WS_CONNECT", "subscribed to predictOrderbook/*")
                 while not SHOULD_STOP:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -122,25 +123,94 @@ async def ws_listener(market_id, csvs):
                         continue
                     t = d.get("type")
                     if t == "M" and "Orderbook" in d.get("topic", ""):
-                        LATEST_OB = d.get("data", {})
-                        LAST_OB_TS = time.time()
-                    elif t == "R" and not d.get("success"):
-                        csvs.event("SUB_ERROR", json.dumps(d.get("error", {})))
+                        data = d.get("data", {})
+                        mid = data.get("marketId")
+                        if mid:
+                            MARKETS[mid] = data
+                            LAST_UPDATE[mid] = time.time()
         except Exception as e:
             csvs.event("WS_DISCONNECT", f"{type(e).__name__}: {e}")
             await asyncio.sleep(2)
 
 
+def select_active_market() -> Optional[int]:
+    """Pick the current BTC 15-min market.
+    Heuristics for 15-min auto-markets vs long-term accumulator markets:
+      - marketId is HIGH (auto-markets get fresh IDs every 15min, currently 280k+)
+      - orderCount moderate (5-100, not hundreds)
+      - depth moderate (under $50k total — long-term markets accumulate $1M+)
+      - prices in 0.05-0.95 range
+      - recent updates in the last 60 seconds
+    """
+    now = time.time()
+    candidates = []
+    for mid, data in MARKETS.items():
+        # Skip low marketIds (long-term markets)
+        if mid < 200000:
+            continue
+        last = LAST_UPDATE.get(mid, 0)
+        if now - last > 60:
+            continue
+        oc = int(data.get("orderCount", 0) or 0)
+        if oc < MIN_ORDER_COUNT or oc > 100:
+            continue
+        bids = data.get("bids", []) or []
+        asks = data.get("asks", []) or []
+        if not bids or not asks:
+            continue
+        try:
+            yes_bid = float(bids[0][0])
+            yes_ask = float(asks[0][0])
+            if not (0.05 <= yes_bid <= 0.95 and 0.05 <= yes_ask <= 0.95):
+                continue
+            total_usd = sum(float(b[0]) * float(b[1]) for b in bids) + \
+                        sum(float(a[0]) * float(a[1]) for a in asks)
+            if total_usd > 100000:  # over $100k = likely long-term market
+                continue
+        except Exception:
+            continue
+        # Score: prefer NEWEST marketId (fresh 15-min market)
+        candidates.append((mid, oc, total_usd))
+
+    if not candidates:
+        return None
+    # Pick highest marketId (newest market = current BTC 15-min)
+    candidates.sort(key=lambda x: -x[0])
+    return candidates[0][0]
+
+
+async def discovery_loop(csvs):
+    """Periodically re-pick the active market. Switch when the current one
+    becomes inactive (no orderbook updates for INACTIVE_THRESHOLD_SEC)."""
+    global CURRENT_MARKET_ID, CURRENT_MARKET_SINCE
+    while not SHOULD_STOP:
+        await asyncio.sleep(DISCOVERY_INTERVAL_SEC)
+        # Check if current market is still active
+        if CURRENT_MARKET_ID is not None:
+            last = LAST_UPDATE.get(CURRENT_MARKET_ID, 0)
+            if time.time() - last > INACTIVE_THRESHOLD_SEC:
+                csvs.event("MARKET_CLOSED", f"market_id={CURRENT_MARKET_ID} no updates for {time.time()-last:.0f}s")
+                CURRENT_MARKET_ID = None
+        # If no current market or it just closed, pick a new one
+        if CURRENT_MARKET_ID is None:
+            picked = select_active_market()
+            if picked:
+                CURRENT_MARKET_ID = picked
+                CURRENT_MARKET_SINCE = time.time()
+                oc = int(MARKETS.get(picked, {}).get("orderCount", 0) or 0)
+                csvs.market_picked(picked, oc)
+                csvs.event("MARKET_PICKED", f"market_id={picked} orderCount={oc}")
+                print(f"[{now_local()}] picked market {picked} (orderCount={oc})")
+
+
 def best_level(side):
-    """side = list of [price, size]. Returns (best_price, best_size, total_usd_at_best)."""
     if not side:
-        return None, None, 0.0
+        return None, None
     try:
         first = side[0]
-        p = float(first[0]); s = float(first[1])
-        return p, s, p * s
+        return float(first[0]), float(first[1])
     except Exception:
-        return None, None, 0.0
+        return None, None
 
 
 def total_usd(side):
@@ -154,7 +224,6 @@ def total_usd(side):
 
 
 def total_no_usd(bids):
-    """For NO depth: each YES bid at price p with size s represents NO sellable at (1-p)*s USD."""
     t = 0.0
     for lvl in bids:
         try:
@@ -166,14 +235,14 @@ def total_no_usd(bids):
 
 
 async def snapshot_loop(csvs):
-    """Every second, write current orderbook snapshot."""
+    """Every second, write current orderbook snapshot of CURRENT_MARKET_ID."""
     while not SHOULD_STOP:
-        if LATEST_OB:
-            ob = LATEST_OB
+        if CURRENT_MARKET_ID is not None and CURRENT_MARKET_ID in MARKETS:
+            ob = MARKETS[CURRENT_MARKET_ID]
             bids = ob.get("bids", []) or []
             asks = ob.get("asks", []) or []
-            yes_bid_p, yes_bid_sz, _ = best_level(bids)
-            yes_ask_p, yes_ask_sz, _ = best_level(asks)
+            yes_bid_p, yes_bid_sz = best_level(bids)
+            yes_ask_p, yes_ask_sz = best_level(asks)
             yes_bid_usd_total = total_usd(bids)
             yes_ask_usd_total = total_usd(asks)
             no_ask_implied = (1.0 - yes_bid_p) if yes_bid_p is not None else None
@@ -196,28 +265,28 @@ async def snapshot_loop(csvs):
                 f"{no_ask_usd_total_v:.4f}",
                 f"{spread:.4f}" if spread is not None else "",
                 ob.get("orderCount", 0),
-                f"{time.time() - LAST_OB_TS:.2f}",
+                f"{time.time() - LAST_UPDATE.get(CURRENT_MARKET_ID, time.time()):.2f}",
             ])
         await asyncio.sleep(POLL_INTERVAL_SEC)
 
 
-async def main_async(market_id):
+async def main_async():
     csvs = CsvStore(DATA_DIR)
-    csvs.event("START", f"market_id={market_id}")
-    print(f"[{now_local()}] starting recorder for market_id={market_id}")
+    csvs.event("START", "auto-discovery mode")
+    print(f"[{now_local()}] starting recorder with auto-discovery")
+    # Wait briefly for WS to populate before first discovery
+    await asyncio.sleep(0)
     await asyncio.gather(
-        ws_listener(market_id, csvs),
+        ws_listener(csvs),
+        discovery_loop(csvs),
         snapshot_loop(csvs),
     )
     csvs.event("STOP", "")
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--market-id", type=int, required=True, help="Predict.fun marketId")
-    args = p.parse_args()
     setup_signals()
-    asyncio.run(main_async(args.market_id))
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
