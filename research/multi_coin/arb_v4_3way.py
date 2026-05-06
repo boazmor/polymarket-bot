@@ -157,10 +157,11 @@ def parse_gemini(row):
         return None
 
 
-def detect_safe_arb(platforms: List[dict]) -> List[dict]:
-    """For each pair, return ONLY the safe direction:
-        UP from lower-strike platform + DOWN from higher-strike platform.
-    Sorts by best (lowest) cost."""
+def detect_arb(platforms: List[dict]) -> List[dict]:
+    """For each pair, return BOTH directions, marking each as safe or dangerous.
+    Safe = UP from lower-strike + DOWN from higher-strike (bonus zone possible).
+    Dangerous = UP from higher-strike + DOWN from lower-strike (both-lose risk
+    if BTC ends in the strike gap)."""
     valid = [p for p in platforms if p and p.get("strike", 0) > 0]
     opps = []
     for i in range(len(valid)):
@@ -173,110 +174,102 @@ def detect_safe_arb(platforms: List[dict]) -> List[dict]:
             strike_gap = higher["strike"] - lower["strike"]
             if strike_gap > MAX_STRIKE_GAP:
                 continue
-            up_ask = lower["up_ask"]
-            down_ask = higher["down_ask"]
-            if up_ask <= 0 or down_ask <= 0 or up_ask >= 1 or down_ask >= 1:
-                continue
-            cost = up_ask + down_ask
             third = next(
                 (p for p in valid if p["platform"] not in (lower["platform"], higher["platform"])),
                 None,
             )
-            opps.append({
-                "pair_label": f"UP@{lower['platform']}+DOWN@{higher['platform']}",
-                "lower": lower,
-                "higher": higher,
-                "third": third,
-                "strike_gap": strike_gap,
-                "up_ask": up_ask,
-                "down_ask": down_ask,
-                "cost": cost,
-            })
+            # SAFE direction: UP@lower + DOWN@higher (BTC in middle = both win)
+            up_ask = lower["up_ask"]; down_ask = higher["down_ask"]
+            if up_ask > 0 and down_ask > 0 and up_ask < 1 and down_ask < 1:
+                opps.append({
+                    "pair_label": f"UP@{lower['platform']}+DOWN@{higher['platform']}",
+                    "direction_safety": "safe",
+                    "leg_up": lower, "leg_down": higher, "third": third,
+                    "strike_gap": strike_gap,
+                    "up_ask": up_ask, "down_ask": down_ask,
+                    "cost": up_ask + down_ask,
+                })
+            # DANGEROUS direction: UP@higher + DOWN@lower (BTC in middle = both LOSE)
+            up_ask = higher["up_ask"]; down_ask = lower["down_ask"]
+            if up_ask > 0 and down_ask > 0 and up_ask < 1 and down_ask < 1:
+                opps.append({
+                    "pair_label": f"UP@{higher['platform']}+DOWN@{lower['platform']}",
+                    "direction_safety": "dangerous",
+                    "leg_up": higher, "leg_down": lower, "third": third,
+                    "strike_gap": strike_gap,
+                    "up_ask": up_ask, "down_ask": down_ask,
+                    "cost": up_ask + down_ask,
+                })
     opps.sort(key=lambda o: o["cost"])
     return opps
 
 
-def attempt_completion(target_shares: float, lower_filled: float, higher_filled: float,
+def attempt_completion(target_shares: float, up_filled: float, down_filled: float,
                        opp: dict) -> Tuple[float, float, float, float, float, str]:
-    """If either leg under-filled, try to complete on the third platform
-    same side. Returns (final_lower_shares, final_higher_shares, third_lower_shares,
-    third_higher_shares, total_cost_paid, completion_note).
-    third_lower_shares = additional UP shares bought on third platform
-    third_higher_shares = additional DOWN shares bought on third platform.
-    """
-    lower_short = target_shares - lower_filled
-    higher_short = target_shares - higher_filled
+    """If either leg under-filled, try to complete on the third platform same side.
+    Returns (final_up_shares, final_down_shares, third_up_shares, third_down_shares,
+    total_cost_paid, completion_note)."""
+    up_short = target_shares - up_filled
+    down_short = target_shares - down_filled
     third = opp.get("third")
 
-    third_lower_shares = 0.0
-    third_higher_shares = 0.0
-    third_lower_cost = 0.0
-    third_higher_cost = 0.0
+    third_up_shares = 0.0
+    third_down_shares = 0.0
+    third_up_cost = 0.0
+    third_down_cost = 0.0
     note = ""
 
-    if (lower_short > 0 or higher_short > 0) and third:
-        if lower_short > 0 and third["up_ask"] > 0:
+    if (up_short > 0 or down_short > 0) and third:
+        if up_short > 0 and third["up_ask"] > 0:
             new_cost = third["up_ask"] + opp["down_ask"]
             if new_cost <= COST_THRESHOLD_COMPLETE:
-                affordable_shares = min(lower_short, third["up_usd_avail"] / max(third["up_ask"], 0.01))
-                third_lower_shares = affordable_shares
-                third_lower_cost = third_lower_shares * third["up_ask"]
-        if higher_short > 0 and third["down_ask"] > 0:
+                affordable_shares = min(up_short, third["up_usd_avail"] / max(third["up_ask"], 0.01))
+                third_up_shares = affordable_shares
+                third_up_cost = third_up_shares * third["up_ask"]
+        if down_short > 0 and third["down_ask"] > 0:
             new_cost = opp["up_ask"] + third["down_ask"]
             if new_cost <= COST_THRESHOLD_COMPLETE:
-                affordable_shares = min(higher_short, third["down_usd_avail"] / max(third["down_ask"], 0.01))
-                third_higher_shares = affordable_shares
-                third_higher_cost = third_higher_shares * third["down_ask"]
-        if third_lower_shares > 0 or third_higher_shares > 0:
+                affordable_shares = min(down_short, third["down_usd_avail"] / max(third["down_ask"], 0.01))
+                third_down_shares = affordable_shares
+                third_down_cost = third_down_shares * third["down_ask"]
+        if third_up_shares > 0 or third_down_shares > 0:
             note = f"COMPLETED_ON_{third['platform']}"
 
-    final_lower = lower_filled + third_lower_shares
-    final_higher = higher_filled + third_higher_shares
+    final_up = up_filled + third_up_shares
+    final_down = down_filled + third_down_shares
 
-    # If still imbalanced, abort the whole trade (can't accept asymmetry per user spec)
-    if abs(final_lower - final_higher) > 0.01:
+    if abs(final_up - final_down) > 0.01:
         return 0.0, 0.0, 0.0, 0.0, 0.0, "ABORTED_imbalance"
 
-    total_cost = (lower_filled * opp["up_ask"]
-                  + higher_filled * opp["down_ask"]
-                  + third_lower_cost + third_higher_cost)
-    return final_lower, final_higher, third_lower_shares, third_higher_shares, total_cost, note
+    total_cost = (up_filled * opp["up_ask"]
+                  + down_filled * opp["down_ask"]
+                  + third_up_cost + third_down_cost)
+    return final_up, final_down, third_up_shares, third_down_shares, total_cost, note
+
+
+TRADE_COLS = [
+    "trade_id", "open_ts", "pair_label", "direction_safety",
+    "up_platform", "up_market_id", "up_strike", "up_ask",
+    "down_platform", "down_market_id", "down_strike", "down_ask",
+    "third_platform", "third_market_id", "third_strike",
+    "strike_gap", "cost_open",
+    "target_shares", "up_shares_filled", "down_shares_filled",
+    "third_up_shares", "third_down_shares",
+    "invest_total", "completion_note",
+    "close_ts", "btc_final", "winner_pattern",
+    "up_payout", "down_payout", "third_up_payout", "third_down_payout",
+    "total_payout", "pnl", "pnl_pct",
+]
 
 
 def init_log():
     if not os.path.exists(LOG):
-        cols = [
-            "trade_id", "open_ts", "pair_label",
-            "lower_platform", "lower_market_id", "lower_strike", "lower_up_ask",
-            "higher_platform", "higher_market_id", "higher_strike", "higher_down_ask",
-            "third_platform", "third_strike",
-            "strike_gap", "cost_open",
-            "target_shares", "lower_shares_filled", "higher_shares_filled",
-            "third_lower_shares", "third_higher_shares",
-            "invest_total", "completion_note",
-            "close_ts", "btc_final", "winner_pattern",
-            "lower_payout", "higher_payout", "third_lower_payout", "third_higher_payout",
-            "total_payout", "pnl", "pnl_pct",
-        ]
         with open(LOG, "w", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerow(cols)
+            csv.writer(fh).writerow(TRADE_COLS)
 
 
 def write_trade(t):
-    cols = [
-        "trade_id", "open_ts", "pair_label",
-        "lower_platform", "lower_market_id", "lower_strike", "lower_up_ask",
-        "higher_platform", "higher_market_id", "higher_strike", "higher_down_ask",
-        "third_platform", "third_strike",
-        "strike_gap", "cost_open",
-        "target_shares", "lower_shares_filled", "higher_shares_filled",
-        "third_lower_shares", "third_higher_shares",
-        "invest_total", "completion_note",
-        "close_ts", "btc_final", "winner_pattern",
-        "lower_payout", "higher_payout", "third_lower_payout", "third_higher_payout",
-        "total_payout", "pnl", "pnl_pct",
-    ]
-    row = [t.get(c, "") for c in cols]
+    row = [t.get(c, "") for c in TRADE_COLS]
     with open(LOG, "a", newline="", encoding="utf-8") as fh:
         csv.writer(fh).writerow(row)
 
@@ -384,61 +377,54 @@ def winner_for_platform(platform: str, market_id: str, side: str) -> Optional[bo
 
 def settle_trade(tid: int) -> bool:
     """Settle using EACH platform's OWN oracle independently.
-    Lower leg = bought UP on lower-strike platform.
-    Higher leg = bought DOWN on higher-strike platform.
-    Third platform completions are tracked side-by-side with their original legs."""
+    Each leg checks its own platform's settled price."""
     t = OPEN_TRADES[tid]
 
-    # Lower leg won = lower platform's own oracle says BTC ended above their strike
-    lower_won = winner_for_platform(t["lower_platform"], t["lower_market_id"], "UP")
-    higher_won = winner_for_platform(t["higher_platform"], t["higher_market_id"], "DOWN")
-    if lower_won is None or higher_won is None:
-        return False  # not yet settled on at least one platform
+    up_won = winner_for_platform(t["up_platform"], t["up_market_id"], "UP")
+    down_won = winner_for_platform(t["down_platform"], t["down_market_id"], "DOWN")
+    if up_won is None or down_won is None:
+        return False
 
-    # Third-platform completion winners depend on side (UP completion or DOWN completion)
-    third_lower_won = None
-    third_higher_won = None
-    if t.get("third_lower_shares", 0) > 0 and t.get("third_platform"):
-        # Need third platform's market_id — we don't have it stored explicitly,
-        # use the pattern: third platform's market for this 15-min window
-        third_lower_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "UP")
-    if t.get("third_higher_shares", 0) > 0 and t.get("third_platform"):
-        third_higher_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "DOWN")
+    third_up_won = None
+    third_down_won = None
+    if t.get("third_up_shares", 0) > 0 and t.get("third_platform"):
+        third_up_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "UP")
+    if t.get("third_down_shares", 0) > 0 and t.get("third_platform"):
+        third_down_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "DOWN")
 
-    # Determine pattern based on independent oracle results
-    if lower_won and higher_won:
-        pattern = "BOTH_WIN_BONUS"
-    elif lower_won and not higher_won:
-        pattern = "ONLY_LOWER_WON"
-    elif not lower_won and higher_won:
-        pattern = "ONLY_HIGHER_WON"
+    # Pattern depends on outcomes vs the trade's safety direction
+    if up_won and down_won:
+        pattern = "BOTH_WIN_BONUS" if t.get("direction_safety") == "safe" else "BOTH_WIN_UNEXPECTED"
+    elif up_won and not down_won:
+        pattern = "UP_WON_ONLY"
+    elif not up_won and down_won:
+        pattern = "DOWN_WON_ONLY"
     else:
-        pattern = "BOTH_LOST_DANGER"
+        pattern = "BOTH_LOST_DANGER" if t.get("direction_safety") == "dangerous" else "BOTH_LOST_UNEXPECTED"
 
-    lower_pay = t["lower_shares_filled"] if lower_won else 0.0
-    higher_pay = t["higher_shares_filled"] if higher_won else 0.0
-    third_lower_pay = t.get("third_lower_shares", 0) if (third_lower_won is True) else 0.0
-    third_higher_pay = t.get("third_higher_shares", 0) if (third_higher_won is True) else 0.0
-    total = lower_pay + higher_pay + third_lower_pay + third_higher_pay
+    up_pay = t["up_shares_filled"] if up_won else 0.0
+    down_pay = t["down_shares_filled"] if down_won else 0.0
+    third_up_pay = t.get("third_up_shares", 0) if (third_up_won is True) else 0.0
+    third_down_pay = t.get("third_down_shares", 0) if (third_down_won is True) else 0.0
+    total = up_pay + down_pay + third_up_pay + third_down_pay
     pnl = total - t["invest_total"]
     pnl_pct = (pnl / t["invest_total"]) * 100 if t["invest_total"] else 0
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     t.update({
         "close_ts": now_ts,
-        # btc_final placeholder — not directly used now since each platform independent
         "btc_final": "",
         "winner_pattern": pattern,
-        "lower_payout": round(lower_pay, 4),
-        "higher_payout": round(higher_pay, 4),
-        "third_lower_payout": round(third_lower_pay, 4),
-        "third_higher_payout": round(third_higher_pay, 4),
+        "up_payout": round(up_pay, 4),
+        "down_payout": round(down_pay, 4),
+        "third_up_payout": round(third_up_pay, 4),
+        "third_down_payout": round(third_down_pay, 4),
         "total_payout": round(total, 4),
         "pnl": round(pnl, 4),
         "pnl_pct": round(pnl_pct, 2),
     })
     write_trade(t)
     CLOSED_TRADES.append(t)
-    print(f"SETTLED #{tid} {t['pair_label']} pattern={pattern} pnl={color_money(pnl)} ({pnl_pct:+.1f}%)")
+    print(f"SETTLED #{tid} [{t.get('direction_safety')}] {t['pair_label']} pattern={pattern} pnl={color_money(pnl)} ({pnl_pct:+.1f}%)")
     del OPEN_TRADES[tid]
     return True
 
@@ -461,7 +447,7 @@ def render_status(p, k, g, opps):
                    f"DN_ask={pf['down_ask']:.3f} ${pf['down_usd_avail']:>7.0f}  "
                    f"market={pf['market_id'][-22:]}")
     out.append("-" * width)
-    out.append(f"{ANSI_BOLD}SAFE-DIRECTION OPPORTUNITIES (UP from lower-strike + DOWN from higher-strike):{ANSI_RESET}")
+    out.append(f"{ANSI_BOLD}OPPORTUNITIES (all 6 directions, safe + dangerous):{ANSI_RESET}")
     if not opps:
         out.append("  (waiting for all 3 feeds with valid strikes)")
     else:
@@ -471,14 +457,16 @@ def render_status(p, k, g, opps):
                 mark = f"  {ANSI_GREEN}{ANSI_BOLD}<- OPEN{ANSI_RESET}"
             elif o["cost"] <= COST_THRESHOLD_COMPLETE:
                 mark = f"  {ANSI_YELLOW}<- completion-only{ANSI_RESET}"
-            out.append(f"  {o['pair_label']:<35} cost={o['cost']:.3f}  "
+            safety_tag = "[BTOC]" if o["direction_safety"] == "safe" else "[MSKN]"
+            out.append(f"  {safety_tag} {o['pair_label']:<32} cost={o['cost']:.3f}  "
                        f"min_profit={(1-o['cost'])*100:+.1f}%  "
                        f"strike_gap=${o['strike_gap']:.0f}{mark}")
     out.append("-" * width)
     out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
     if OPEN_TRADES:
         for tid, t in sorted(OPEN_TRADES.items()):
-            out.append(f"  #{tid:>3}  {t['pair_label']}  open={t['open_ts']}  "
+            safety_tag = "[BTOC]" if t.get("direction_safety") == "safe" else "[MSKN]"
+            out.append(f"  #{tid:>3} {safety_tag} {t['pair_label']}  open={t['open_ts']}  "
                        f"cost={t['cost_open']:.3f}  shares={t['target_shares']:.1f}  "
                        f"completion={t.get('completion_note','none')}")
     out.append("-" * width)
@@ -517,70 +505,69 @@ def main():
             p = parse_poly(tail_last_row(P_PATH, p_header))
             k = parse_kalshi(tail_last_row(K_PATH, k_header))
             g = parse_gemini(tail_last_row(G_PATH, g_header))
-            opps = detect_safe_arb([p, k, g])
+            opps = detect_arb([p, k, g])
             now_unix = time.time()
             for o in opps:
                 if o["cost"] > COST_THRESHOLD_OPEN:
                     continue
                 pair_label = o["pair_label"]
-                market_combo = f"{o['lower']['market_id']}|{o['higher']['market_id']}"
+                market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
                 cd_key = (pair_label, market_combo)
                 if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC:
                     continue
-                if MARKET_TRADE_COUNT.get(market_combo, 0) >= MAX_TRADES_PER_MARKET:
+                if MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
                     continue
-                # Symmetric sizing
-                lower_avail = o["lower"]["up_usd_avail"]
-                higher_avail = o["higher"]["down_usd_avail"]
-                if lower_avail <= 0 or higher_avail <= 0:
+                up_avail = o["leg_up"]["up_usd_avail"]
+                down_avail = o["leg_down"]["down_usd_avail"]
+                if up_avail <= 0 or down_avail <= 0:
                     continue
-                # 50% of min depth (USD)
-                usable_per_side = min(lower_avail, higher_avail) * DEPTH_USE_FRACTION
+                usable_per_side = min(up_avail, down_avail) * DEPTH_USE_FRACTION
                 invest_per_side = min(INVEST_PER_SIDE_TARGET, usable_per_side)
                 if invest_per_side < INVEST_PER_SIDE_MIN:
                     continue
-                # Equal shares
                 max_price = max(o["up_ask"], o["down_ask"])
                 target_shares = invest_per_side / max_price
-                # Compute actual fill (in simulation: filled = min(target, available_at_best))
-                lower_max = lower_avail / max(o["up_ask"], 0.01)
-                higher_max = higher_avail / max(o["down_ask"], 0.01)
-                lower_filled = min(target_shares, lower_max * DEPTH_USE_FRACTION)
-                higher_filled = min(target_shares, higher_max * DEPTH_USE_FRACTION)
-                # If under-filled, attempt completion
-                final_l, final_h, t_l, t_h, total_cost, note = attempt_completion(
-                    target_shares, lower_filled, higher_filled, o
+                up_max = up_avail / max(o["up_ask"], 0.01)
+                down_max = down_avail / max(o["down_ask"], 0.01)
+                up_filled = min(target_shares, up_max * DEPTH_USE_FRACTION)
+                down_filled = min(target_shares, down_max * DEPTH_USE_FRACTION)
+                final_u, final_d, t_u, t_d, total_cost, note = attempt_completion(
+                    target_shares, up_filled, down_filled, o
                 )
                 if note == "ABORTED_imbalance":
                     continue
-                if final_l < 0.01:
+                if final_u < 0.01:
                     continue
                 LAST_OPEN_TS[cd_key] = now_unix
-                MARKET_TRADE_COUNT[market_combo] = MARKET_TRADE_COUNT.get(market_combo, 0) + 1
+                MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
                 open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 third = o.get("third") or {}
+                # For STRIKE column purposes:
+                #   Safe direction: up leg has lower strike, down leg has higher strike
+                #   Dangerous: opposite
                 OPEN_TRADES[NEXT_TRADE_ID] = {
                     "trade_id": NEXT_TRADE_ID,
                     "open_ts": open_ts,
                     "pair_label": pair_label,
-                    "lower_platform": o["lower"]["platform"],
-                    "lower_market_id": o["lower"]["market_id"],
-                    "lower_strike": o["lower"]["strike"],
-                    "lower_up_ask": round(o["up_ask"], 4),
-                    "higher_platform": o["higher"]["platform"],
-                    "higher_market_id": o["higher"]["market_id"],
-                    "higher_strike": o["higher"]["strike"],
-                    "higher_down_ask": round(o["down_ask"], 4),
+                    "direction_safety": o["direction_safety"],
+                    "up_platform": o["leg_up"]["platform"],
+                    "up_market_id": o["leg_up"]["market_id"],
+                    "up_strike": o["leg_up"]["strike"],
+                    "up_ask": round(o["up_ask"], 4),
+                    "down_platform": o["leg_down"]["platform"],
+                    "down_market_id": o["leg_down"]["market_id"],
+                    "down_strike": o["leg_down"]["strike"],
+                    "down_ask": round(o["down_ask"], 4),
                     "third_platform": third.get("platform", ""),
                     "third_strike": third.get("strike", ""),
                     "third_market_id": third.get("market_id", ""),
                     "strike_gap": round(o["strike_gap"], 2),
                     "cost_open": round(o["cost"], 4),
                     "target_shares": round(target_shares, 4),
-                    "lower_shares_filled": round(lower_filled, 4),
-                    "higher_shares_filled": round(higher_filled, 4),
-                    "third_lower_shares": round(t_l, 4),
-                    "third_higher_shares": round(t_h, 4),
+                    "up_shares_filled": round(up_filled, 4),
+                    "down_shares_filled": round(down_filled, 4),
+                    "third_up_shares": round(t_u, 4),
+                    "third_down_shares": round(t_d, 4),
                     "invest_total": round(total_cost, 4),
                     "completion_note": note,
                 }
