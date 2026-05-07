@@ -409,17 +409,29 @@ def main():
                     ("A", cost_a, p["ua"], pr["no_ask_implied"], p["ua_usd"], pr["no_ask_usd"]),
                     ("B", cost_b, p["da"], pr["yes_ask"], p["da_usd"], pr["yes_ask_usd"]),
                 ]
-                # CRITICAL: gap between Poly strike and Predict strike (real Pyth)
-                poly_predict_gap = abs((p["tgt"] if p else 0) - (predict_strike or 0)) if predict_strike else 0
+                # Skip if Predict strike unknown — flying blind
+                if predict_strike is None:
+                    continue
+                poly_strike = p["tgt"] if p else 0
+                poly_predict_gap = abs(poly_strike - predict_strike)
+
+                # POSITIVE direction is SAFE (UP from lower-strike + DOWN from higher-strike).
+                # If poly_strike < predict_strike: positive = A (PolyUP + PredictNO).
+                # If poly_strike > predict_strike: positive = B (PolyDOWN + PredictYES).
+                if poly_strike < predict_strike:
+                    positive_direction = "A"
+                elif poly_strike > predict_strike:
+                    positive_direction = "B"
+                else:
+                    positive_direction = None  # equal strikes = both directions equivalent
+
                 for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
                     if cost > COST_THRESHOLD_NORMAL: continue
                     if p_ask > SINGLE_LEG_MAX_ASK or pr_ask > SINGLE_LEG_MAX_ASK: continue
-                    # CRITICAL FILTER: don't open if Poly+Predict strikes diverge significantly
-                    # (this is what caused V5 basic to lose 39 trades = $1,675)
-                    if predict_strike and poly_predict_gap >= NEGATIVE_GAP_BLOCK:
-                        continue
-                    # Skip if Predict strike unknown (we'd be flying blind)
-                    if predict_strike is None:
+                    is_positive = (positive_direction is None) or (direction == positive_direction)
+                    # Trade ALL positive-direction opportunities (safe — at least one wins)
+                    # Negative direction: block (this is what cost V5 basic \$1,675)
+                    if not is_positive:
                         continue
                     # Block if Gemini is heavy outlier (high dispersion = risky)
                     if outlier_info[0] == "GEMINI" and outlier_info[1] >= 80:
