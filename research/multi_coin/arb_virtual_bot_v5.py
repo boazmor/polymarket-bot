@@ -202,11 +202,11 @@ def lookup_predict_winner(market_id):
                 yb = float(row.get("yes_bid") or 0)
             except Exception:
                 continue
-            # If both bid and ask are very high → YES won (UP)
-            if ya >= 0.97 and yb >= 0.97:
+            # YES won: yes_bid near 1.00 (book often one-sided after settle)
+            if yb >= 0.97:
                 return "YES"
-            # If both very low → NO won (DOWN)
-            if ya <= 0.03 and yb <= 0.03 and ya > 0:
+            # NO won: yes_ask near 0 (book often one-sided after settle)
+            if ya > 0 and ya <= 0.03:
                 return "NO"
         return None
     except Exception:
