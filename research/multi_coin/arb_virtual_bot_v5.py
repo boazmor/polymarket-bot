@@ -132,10 +132,11 @@ def lookup_poly_winner(slug):
 
 
 def lookup_pyth_target(market_open_epoch):
-    """Returns the REAL Predict.fun target — i.e. Pyth's BTC/USD price at the
-    moment the 15-min market opened. Predict.fun uses this Pyth snapshot as its
-    strike, even though the public API does not expose it. We get it ourselves
-    from the Pyth recorder. Accepts only samples within 5 seconds of open."""
+    """Returns the REAL Predict.fun target — Pyth BTC/USD at market open.
+    Predict.fun captures the Pyth price 2-5 seconds AFTER the nominal 15-min
+    boundary because that's when the BNB block confirms the open. So we
+    average Pyth samples in [open+1, open+8] to best match Predict's actual
+    block-confirmation moment. Falls back to closest within 10s if window empty."""
     if not market_open_epoch:
         return None
     try:
@@ -145,8 +146,8 @@ def lookup_pyth_target(market_open_epoch):
         header = read_header(PYTH)
         if not header:
             return None
-        best_diff = 999999
-        best_price = None
+        prices_in_window = []
+        fallback_price = None; fallback_diff = 999
         for line in out.stdout.strip().split("\n"):
             values = line.split(",")
             if len(values) < len(header):
@@ -159,11 +160,16 @@ def lookup_pyth_target(market_open_epoch):
                 continue
             if price <= 0:
                 continue
-            diff = abs(e - market_open_epoch)
-            if diff < best_diff:
-                best_diff = diff
-                best_price = price
-        return best_price if best_diff <= 5 else None
+            offset = e - market_open_epoch
+            if 1 <= offset <= 8:
+                prices_in_window.append(price)
+            if abs(offset) < fallback_diff:
+                fallback_diff = abs(offset); fallback_price = price
+        if prices_in_window:
+            return sum(prices_in_window) / len(prices_in_window)
+        if fallback_diff <= 10:
+            return fallback_price
+        return None
     except Exception:
         return None
 
