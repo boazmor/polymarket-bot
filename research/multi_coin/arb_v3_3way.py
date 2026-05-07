@@ -322,7 +322,7 @@ def render_status(p, k, g, opps):
     out = ["\033[H\033[2J\033[3J\033[?25l"]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out.append(f"{ANSI_BOLD}ARB_V3_3WAY (Spread Arb 3 Platforms){ANSI_RESET}   "
-               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET} ${INVEST_PER_SIDE:.0f}/side  "
+               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET} ${INVEST_PER_SIDE_TARGET:.0f}/side max (liq-capped)  "
                f"threshold cost≤{COST_THRESHOLD}")
     out.append("=" * width)
     out.append(f"TIME: {now}")
