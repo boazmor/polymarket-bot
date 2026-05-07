@@ -54,6 +54,7 @@ LOG = "/root/arb_virtual_trades.csv"
 INVEST_PER_SIDE_TARGET = 100.0   # ideal $ per side
 INVEST_MIN = 5.0                 # don't bother with trades smaller than $5/side
 COST_THRESHOLD = 0.90            # open when cost ≤ this (≥10% profit)
+SINGLE_LEG_MAX_ASK = 0.70        # per-leg cap (per user 07/05) — never buy any leg >0.70
 MAX_TRADES_PER_MARKET = 15       # cap per 15min market (across both directions)
 COOLDOWN_SEC = 5                 # min seconds between opens on same (direction,market)
 MAX_STRIKE_DIFF = 50
@@ -486,6 +487,9 @@ def main():
                         continue
                     # Cost gate
                     if cost > COST_THRESHOLD:
+                        continue
+                    # Per-leg max (per user 07/05) — never buy any leg >0.70
+                    if poly_ask > SINGLE_LEG_MAX_ASK or kalshi_ask > SINGLE_LEG_MAX_ASK:
                         continue
                     # Depth-based sizing: target $100/side, but never take more
                     # than half the smaller side's available depth (avoid slippage).

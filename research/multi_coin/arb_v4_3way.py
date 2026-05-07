@@ -52,7 +52,7 @@ DEPTH_USE_FRACTION = 0.5
 COST_THRESHOLD_NORMAL = 0.90        # base: ≥10% profit (per user)
 COST_THRESHOLD_AGGRESSIVE = 0.96    # safe direction + strike_gap >= 50 (more bonus area)
 COST_THRESHOLD_COMPLETE = 0.92      # used when completing missing leg on 3rd platform
-SINGLE_LEG_MAX_ASK = 0.80           # per-leg cap: never buy any leg priced above this
+SINGLE_LEG_MAX_ASK = 0.70           # per-leg cap (lowered 07/05 per user): never buy any leg >0.70
 DANGEROUS_GAP_BLOCK = 50            # block dangerous direction when strike_gap >= this
 AGGRESSIVE_GAP_THRESHOLD = 50       # safe direction uses aggressive threshold above this gap
 COOLDOWN_SEC_NORMAL = 10            # cooldown for non-safe trades
@@ -690,8 +690,11 @@ def main():
                 if o["up_ask"] > SINGLE_LEG_MAX_ASK or o["down_ask"] > SINGLE_LEG_MAX_ASK:
                     continue
 
-                # Dangerous direction = SHADOW (tracked but not actually traded)
-                is_shadow = (not is_safe)
+                # PILOT MODE (07/05): trade everything regardless of direction.
+                # Tag direction_safety in CSV for post-hoc analysis but no blocking.
+                # This was changed from "shadow only" to capture all opportunities
+                # — V4 was missing all Poly+Kalshi trades V2 was making profitably.
+                is_shadow = False  # everything is real now
 
                 # Variable cost threshold: aggressive 0.96 for safe + large gap; normal 0.90 otherwise
                 if is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
