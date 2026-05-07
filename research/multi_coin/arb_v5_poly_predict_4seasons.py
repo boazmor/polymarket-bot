@@ -152,8 +152,12 @@ def parse_predict(row):
 
 
 def lookup_pyth_strike(market_open_epoch):
-    """Returns Pyth's BTC/USD price at the given epoch (= Predict.fun's strike).
-    Looks for the closest sample to the given second from the Pyth recorder."""
+    """Returns Pyth's BTC/USD price corresponding to Predict.fun's strike.
+    Predict.fun sets its strike when the BNB Chain block confirms the
+    market open — typically 2-5 seconds AFTER the nominal 15-min boundary.
+    So we search for Pyth samples in [open_epoch + 1, open_epoch + 8] and
+    take the AVERAGE of all samples in that window. This best approximates
+    the actual block-confirmation moment when Predict captured Pyth's price."""
     if not market_open_epoch:
         return None
     try:
@@ -161,7 +165,8 @@ def lookup_pyth_strike(market_open_epoch):
         if not out.stdout: return None
         header = read_header(PYTH)
         if not header: return None
-        best_diff = 999999; best_price = None
+        prices_in_window = []
+        fallback_price = None; fallback_diff = 999
         for line in out.stdout.strip().split("\n"):
             values = line.split(",")
             if len(values) < len(header): continue
@@ -172,12 +177,16 @@ def lookup_pyth_strike(market_open_epoch):
             except Exception:
                 continue
             if price <= 0: continue
-            diff = abs(e - market_open_epoch)
-            if diff < best_diff:
-                best_diff = diff; best_price = price
-            if diff > 60 and best_price is not None:
-                continue
-        return best_price if best_diff <= 5 else None  # accept only if within 5 seconds
+            offset = e - market_open_epoch
+            if 1 <= offset <= 8:
+                prices_in_window.append(price)
+            if abs(offset) < fallback_diff:
+                fallback_diff = abs(offset); fallback_price = price
+        if prices_in_window:
+            return sum(prices_in_window) / len(prices_in_window)
+        if fallback_diff <= 10:
+            return fallback_price
+        return None
     except Exception:
         return None
 
