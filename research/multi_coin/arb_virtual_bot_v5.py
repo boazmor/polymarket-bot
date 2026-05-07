@@ -29,6 +29,7 @@ from typing import Optional
 
 P = "/root/data_btc_15m_research/combined_per_second.csv"
 PR = "/root/data_predict_btc_15m/combined_per_second.csv"
+PYTH = "/root/data_pyth_btc/per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v5_predict_trades.csv"
 
@@ -130,6 +131,51 @@ def lookup_poly_winner(slug):
     return None
 
 
+def lookup_pyth_target(market_open_epoch):
+    """Returns the REAL Predict.fun target — i.e. Pyth's BTC/USD price at the
+    moment the 15-min market opened. Predict.fun uses this Pyth snapshot as its
+    strike, even though the public API does not expose it. We get it ourselves
+    from the Pyth recorder. Accepts only samples within 5 seconds of open."""
+    if not market_open_epoch:
+        return None
+    try:
+        out = subprocess.run(["tail", "-n", "2000", PYTH], capture_output=True, text=True, timeout=5)
+        if not out.stdout:
+            return None
+        header = read_header(PYTH)
+        if not header:
+            return None
+        best_diff = 999999
+        best_price = None
+        for line in out.stdout.strip().split("\n"):
+            values = line.split(",")
+            if len(values) < len(header):
+                continue
+            row = dict(zip(header, values))
+            try:
+                e = int(row.get("epoch_sec") or 0)
+                price = float(row.get("btc_price") or 0)
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+            diff = abs(e - market_open_epoch)
+            if diff < best_diff:
+                best_diff = diff
+                best_price = price
+        return best_price if best_diff <= 5 else None
+    except Exception:
+        return None
+
+
+def derive_market_open_epoch(epoch_now):
+    """Round down to nearest 15-min boundary — Predict.fun market opens on those
+    boundaries, and Pyth's price at that exact second becomes the target."""
+    if not epoch_now:
+        return None
+    return (int(epoch_now) // 900) * 900
+
+
 def lookup_predict_winner(market_id):
     """Predict.fun settles via Pyth. After settlement, last_trade_price (or final
     yes_bid/yes_ask) collapses to ~1.00 (YES won = UP) or ~0.00 (NO won = DOWN).
@@ -171,7 +217,7 @@ def write_trade_row(t):
     cols = [
         "trade_id", "open_ts", "direction",
         "poly_slug", "predict_market_id",
-        "poly_strike", "predict_market_id_str",
+        "poly_target", "predict_target_real", "target_gap",
         "poly_ask", "predict_ask",
         "cost", "profit_pct_open",
         "shares", "invest_usd",
@@ -264,8 +310,14 @@ def render_status(p, pr):
     out.append(f"TIME : {now}")
     out.append("-" * width)
     if p and pr:
-        out.append(f"  POLY    UP={p['ua']:.3f} DOWN={p['da']:.3f}  strike={p['tgt']:.0f}  market={p['slug'][-25:]}")
-        out.append(f"  PREDICT YES={pr['yes_ask']:.3f} bid={pr['yes_bid']:.3f}  NO_implied={pr['no_ask_implied']:.3f}  mid={pr['market_id']}")
+        # Real Predict target via Pyth at the 15-min boundary
+        pyth_target = lookup_pyth_target(derive_market_open_epoch(pr.get('epoch')))
+        gap_str = ""
+        if pyth_target is not None and p['tgt']:
+            gap_str = f"  gap=${abs(p['tgt']-pyth_target):.0f}"
+        out.append(f"  POLY    UP={p['ua']:.3f} DOWN={p['da']:.3f}  target={p['tgt']:.0f}  market={p['slug'][-25:]}")
+        pyth_str = f"{pyth_target:.0f}" if pyth_target else "n/a"
+        out.append(f"  PREDICT YES={pr['yes_ask']:.3f} bid={pr['yes_bid']:.3f}  NO_implied={pr['no_ask_implied']:.3f}  pyth_target={pyth_str}{gap_str}")
         cost_a = p['ua'] + pr['no_ask_implied']
         cost_b = p['da'] + pr['yes_ask']
         def mark(c):
@@ -350,6 +402,15 @@ def main():
                     key = (direction, market_id)
                     if time.time() - last_open_ts.get(key, 0) < COOLDOWN_SEC: continue
 
+                    # Look up REAL Predict.fun target via Pyth (the price Pyth saw
+                    # at the 15-min market open boundary). This replaces the old
+                    # proxy that assumed Predict's target equals Poly's target.
+                    market_open_epoch = derive_market_open_epoch(pr.get('epoch'))
+                    predict_target_real = lookup_pyth_target(market_open_epoch)
+                    target_gap = ""
+                    if predict_target_real is not None and p['tgt']:
+                        target_gap = round(abs(p['tgt'] - predict_target_real), 2)
+
                     last_open_ts[key] = time.time()
                     market_count[market_id] = market_count.get(market_id, 0) + 1
                     OPEN_TRADES[NEXT_TRADE_ID] = {
@@ -358,8 +419,10 @@ def main():
                         "direction": direction,
                         "poly_slug": p['slug'],
                         "predict_market_id": pr['market_id'],
-                        "predict_market_id_str": str(pr['market_id']),
-                        "poly_strike": p['tgt'],
+                        "poly_target": p['tgt'],
+                        "predict_target_real": (round(predict_target_real, 2)
+                                                if predict_target_real is not None else ""),
+                        "target_gap": target_gap,
                         "poly_ask": round(p_ask, 4),
                         "predict_ask": round(pr_ask, 4),
                         "cost": round(cost, 4),
