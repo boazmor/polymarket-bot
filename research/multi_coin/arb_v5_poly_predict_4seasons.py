@@ -242,7 +242,7 @@ def find_outlier_strike(strikes):
 
 def write_trade_row(t):
     cols = [
-        "trade_id", "open_ts", "direction",
+        "trade_id", "open_ts", "direction", "direction_safety", "poly_predict_gap",
         "poly_slug", "predict_market_id",
         "poly_strike", "kalshi_strike", "gemini_strike", "predict_strike_proxy",
         "outlier_platform", "outlier_distance",
@@ -261,7 +261,7 @@ def write_trade_row(t):
 def init_log():
     if not os.path.exists(LOG):
         cols = [
-            "trade_id", "open_ts", "direction",
+            "trade_id", "open_ts", "direction", "direction_safety", "poly_predict_gap",
             "poly_slug", "predict_market_id",
             "poly_strike", "kalshi_strike", "gemini_strike", "predict_strike_proxy",
             "outlier_platform", "outlier_distance",
@@ -409,33 +409,23 @@ def main():
                     ("A", cost_a, p["ua"], pr["no_ask_implied"], p["ua_usd"], pr["no_ask_usd"]),
                     ("B", cost_b, p["da"], pr["yes_ask"], p["da_usd"], pr["yes_ask_usd"]),
                 ]
-                # Skip if Predict strike unknown — flying blind
-                if predict_strike is None:
-                    continue
+                # PILOT MODE: don't block anything. Capture all info for post-hoc analysis.
                 poly_strike = p["tgt"] if p else 0
-                poly_predict_gap = abs(poly_strike - predict_strike)
+                poly_predict_gap = abs(poly_strike - predict_strike) if predict_strike else 0
 
-                # POSITIVE direction is SAFE (UP from lower-strike + DOWN from higher-strike).
-                # If poly_strike < predict_strike: positive = A (PolyUP + PredictNO).
-                # If poly_strike > predict_strike: positive = B (PolyDOWN + PredictYES).
-                if poly_strike < predict_strike:
-                    positive_direction = "A"
-                elif poly_strike > predict_strike:
-                    positive_direction = "B"
+                # Tag direction safety for later analysis (no blocking)
+                if predict_strike and poly_strike < predict_strike:
+                    positive_direction = "A"  # safe = PolyUP + PredictNO
+                elif predict_strike and poly_strike > predict_strike:
+                    positive_direction = "B"  # safe = PolyDOWN + PredictYES
                 else:
-                    positive_direction = None  # equal strikes = both directions equivalent
+                    positive_direction = "?"
 
                 for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
                     if cost > COST_THRESHOLD_NORMAL: continue
                     if p_ask > SINGLE_LEG_MAX_ASK or pr_ask > SINGLE_LEG_MAX_ASK: continue
-                    is_positive = (positive_direction is None) or (direction == positive_direction)
-                    # Trade ALL positive-direction opportunities (safe — at least one wins)
-                    # Negative direction: block (this is what cost V5 basic \$1,675)
-                    if not is_positive:
-                        continue
-                    # Block if Gemini is heavy outlier (high dispersion = risky)
-                    if outlier_info[0] == "GEMINI" and outlier_info[1] >= 80:
-                        continue
+                    direction_safety = "safe" if direction == positive_direction else \
+                                      ("dangerous" if positive_direction in ("A","B") else "unknown")
 
                     # Sizing
                     min_depth = min(p_depth, pr_depth)
@@ -457,6 +447,8 @@ def main():
                         "trade_id": NEXT_TRADE_ID,
                         "open_ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "direction": direction,
+                        "direction_safety": direction_safety,
+                        "poly_predict_gap": round(poly_predict_gap, 2),
                         "poly_slug": p["slug"],
                         "predict_market_id": pr["market_id"],
                         "poly_strike": p["tgt"],
