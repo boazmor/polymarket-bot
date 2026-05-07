@@ -200,6 +200,9 @@ def lookup_poly_winner(slug):
 
 
 def lookup_predict_winner(market_id):
+    """At settlement, the orderbook collapses: winning side = price 1.00,
+    losing side = price 0.00. Often the winning side has only bids (no one
+    sells), and the losing side has only asks. Need to handle both cases."""
     if not market_id: return None
     try:
         out = subprocess.run(["tail", "-n", "5000", PR], capture_output=True, text=True, timeout=10)
@@ -216,8 +219,14 @@ def lookup_predict_winner(market_id):
                 yb = float(row.get("yes_bid") or 0)
             except Exception:
                 continue
-            if ya >= 0.97 and yb >= 0.97: return "YES"
-            if ya <= 0.03 and yb <= 0.03 and ya > 0: return "NO"
+            # YES won: yes_bid near 1.00 (people buying YES at near $1 since it pays $1)
+            # ya may be empty (no sellers) — accept if yb is decisive
+            if yb >= 0.97:
+                return "YES"
+            # NO won: yes_ask near 0 (people selling YES for nothing since it pays $0)
+            # yb may be empty (no buyers) — accept if ya is decisive
+            if ya > 0 and ya <= 0.03:
+                return "NO"
         return None
     except Exception:
         return None
