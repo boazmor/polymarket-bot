@@ -44,6 +44,7 @@ P = "/root/data_btc_15m_research/combined_per_second.csv"
 K = "/root/data_kalshi_btc_15m/combined_per_second.csv"
 G = "/root/data_gemini_btc_15m/combined_per_second.csv"
 PR = "/root/data_predict_btc_15m/combined_per_second.csv"
+PYTH = "/root/data_pyth_btc/per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v5_4seasons_trades.csv"
 
@@ -148,6 +149,43 @@ def parse_predict(row):
         }
     except Exception:
         return None
+
+
+def lookup_pyth_strike(market_open_epoch):
+    """Returns Pyth's BTC/USD price at the given epoch (= Predict.fun's strike).
+    Looks for the closest sample to the given second from the Pyth recorder."""
+    if not market_open_epoch:
+        return None
+    try:
+        out = subprocess.run(["tail", "-n", "2000", PYTH], capture_output=True, text=True, timeout=5)
+        if not out.stdout: return None
+        header = read_header(PYTH)
+        if not header: return None
+        best_diff = 999999; best_price = None
+        for line in out.stdout.strip().split("\n"):
+            values = line.split(",")
+            if len(values) < len(header): continue
+            row = dict(zip(header, values))
+            try:
+                e = int(row.get("epoch_sec") or 0)
+                price = float(row.get("btc_price") or 0)
+            except Exception:
+                continue
+            if price <= 0: continue
+            diff = abs(e - market_open_epoch)
+            if diff < best_diff:
+                best_diff = diff; best_price = price
+            if diff > 60 and best_price is not None:
+                continue
+        return best_price if best_diff <= 5 else None  # accept only if within 5 seconds
+    except Exception:
+        return None
+
+
+def derive_market_open_epoch(predict_market_id, predict_epoch_now):
+    """Approximate market open time by rounding down predict_epoch_now to nearest 15min boundary."""
+    if not predict_epoch_now: return None
+    return (predict_epoch_now // 900) * 900
 
 
 def lookup_poly_winner(slug):
@@ -290,10 +328,15 @@ def render_status(p, k, g, pr, outlier_info):
     if p: out.append(f"  POLY    strike={p['tgt']:.0f}  UP={p['ua']:.3f}  DOWN={p['da']:.3f}")
     if k: out.append(f"  KALSHI  strike={k['strike']:.0f}  (info only)")
     if g: out.append(f"  GEMINI  strike={g['strike']:.0f}  (info only)")
-    if pr: out.append(f"  PREDICT YES={pr['yes_ask']:.3f}  bid={pr['yes_bid']:.3f}  NO_impl={pr['no_ask_implied']:.3f}  market={pr['market_id']}")
+    pr_strike_str = ""
+    try:
+        pr_strike_str = f" strike(Pyth)={lookup_pyth_strike((pr['epoch']//900)*900):.0f}" if pr else ""
+    except Exception:
+        pr_strike_str = ""
+    if pr: out.append(f"  PREDICT YES={pr['yes_ask']:.3f}  bid={pr['yes_bid']:.3f}  NO_impl={pr['no_ask_implied']:.3f}{pr_strike_str}  market={pr['market_id']}")
 
     out_p, out_d, _ = outlier_info
-    out.append(f"  OUTLIER: {out_p or '-'}  distance=${out_d:.0f}  (Predict strike unknown — uses Poly proxy)")
+    out.append(f"  OUTLIER: {out_p or '-'}  distance=${out_d:.0f}")
     out.append("-" * width)
 
     n = len(CLOSED_TRADES)
@@ -336,12 +379,17 @@ def main():
             }
             tradeable = ages["poly"] <= MAX_FEED_AGE_SEC and ages["predict"] <= MAX_FEED_AGE_SEC
 
-            # Identify outlier across the 4 strikes (Predict uses Poly proxy)
+            # Identify outlier across the 4 strikes (Predict now uses REAL Pyth strike)
+            predict_strike = None
+            if pr:
+                # Find market open epoch (round down to 15-min boundary)
+                market_open = derive_market_open_epoch(pr["market_id"], pr["epoch"])
+                predict_strike = lookup_pyth_strike(market_open)
             strikes = {
                 "POLY": p["tgt"] if p else 0,
                 "KALSHI": k["strike"] if k else 0,
                 "GEMINI": g["strike"] if g else 0,
-                "PREDICT_proxy": p["tgt"] if p else 0,  # PROXY: same as Poly
+                "PREDICT": predict_strike or (p["tgt"] if p else 0),  # fallback to Poly if Pyth unavailable
             }
             outlier_info = find_outlier_strike(strikes)
 
@@ -361,12 +409,18 @@ def main():
                     ("A", cost_a, p["ua"], pr["no_ask_implied"], p["ua_usd"], pr["no_ask_usd"]),
                     ("B", cost_b, p["da"], pr["yes_ask"], p["da_usd"], pr["yes_ask_usd"]),
                 ]
+                # CRITICAL: gap between Poly strike and Predict strike (real Pyth)
+                poly_predict_gap = abs((p["tgt"] if p else 0) - (predict_strike or 0)) if predict_strike else 0
                 for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
                     if cost > COST_THRESHOLD_NORMAL: continue
                     if p_ask > SINGLE_LEG_MAX_ASK or pr_ask > SINGLE_LEG_MAX_ASK: continue
-                    # Block if Predict is the outlier (we don't trust Pyth diverging from others)
-                    if outlier_info[0] in ("PREDICT_proxy",):  # never triggers since proxy
-                        pass  # placeholder for when we have real Predict strike
+                    # CRITICAL FILTER: don't open if Poly+Predict strikes diverge significantly
+                    # (this is what caused V5 basic to lose 39 trades = $1,675)
+                    if predict_strike and poly_predict_gap >= NEGATIVE_GAP_BLOCK:
+                        continue
+                    # Skip if Predict strike unknown (we'd be flying blind)
+                    if predict_strike is None:
+                        continue
                     # Block if Gemini is heavy outlier (high dispersion = risky)
                     if outlier_info[0] == "GEMINI" and outlier_info[1] >= 80:
                         continue
@@ -396,7 +450,7 @@ def main():
                         "poly_strike": p["tgt"],
                         "kalshi_strike": k["strike"] if k else "",
                         "gemini_strike": g["strike"] if g else "",
-                        "predict_strike_proxy": p["tgt"],
+                        "predict_strike_proxy": round(predict_strike, 2) if predict_strike else "",
                         "outlier_platform": outlier_info[0] or "",
                         "outlier_distance": round(outlier_info[1], 2),
                         "poly_ask": round(p_ask, 4),
