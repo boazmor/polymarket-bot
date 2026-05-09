@@ -1,0 +1,907 @@
+#!/usr/bin/env python3
+"""
+arb_v4_3way.py — 3-platform safe-direction arb with completion logic.
+
+Key design (per user spec 06/05/2026 evening):
+
+1. Safe-direction filter: For each platform pair, only consider the
+   direction where UP comes from the LOWER-strike platform and DOWN
+   comes from the HIGHER-strike platform. This guarantees that AT LEAST
+   ONE leg always wins (and BOTH win when BTC ends in the strike gap).
+   Skipping the dangerous direction (UP from higher, DOWN from lower)
+   prevents the both-lose scenario.
+
+2. Symmetric shares: Buy the same number of shares on each leg, computed
+   as invest_per_side / max(price1, price2). This is true spread arb,
+   not asymmetric dollar-balanced (which was the bug in V3).
+
+3. Depth-bounded sizing: Limit to 50% of the smaller leg's USD depth.
+   Min $15 per side or skip. Target $50 per side max.
+
+4. Completion logic: If actual fill is short on one leg, attempt to top
+   up on the third platform same side, accepting slightly worse price
+   (cost extension threshold 0.85 instead of 0.80). If still can't
+   complete, the simulator marks the trade as ABORTED.
+
+5. All 3 pairs (Poly+Kalshi, Poly+Gemini, Kalshi+Gemini) considered each
+   second; each pair contributes one safe-direction candidate.
+
+Output: /root/arb_v4_3way_trades.csv
+
+Run:
+  screen -dmS arb_v4 python3 /root/arb_v4_3way.py
+"""
+import csv
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from typing import Dict, Optional, Tuple, List
+
+P_PATH = "/root/data_btc_15m_research/combined_per_second.csv"
+K_PATH = "/root/data_kalshi_btc_15m/combined_per_second.csv"
+G_PATH = "/root/data_gemini_btc_15m/combined_per_second.csv"
+PR_PATH = "/root/data_predict_btc_15m/combined_per_second.csv"
+PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
+LOG = "/root/arb_v4_4way_trades.csv"
+MARKET_REPORT = "/root/arb_v4_4way_market_report.csv"
+
+INVEST_PER_SIDE_TARGET = 100.0   # per user 06/05: $100 per side ideal
+INVEST_PER_SIDE_MIN = 15.0
+DEPTH_USE_FRACTION = 0.5
+COST_THRESHOLD_NORMAL = 0.90        # base: ≥10% profit (per user)
+COST_THRESHOLD_AGGRESSIVE = 0.96    # safe direction + strike_gap >= 50 (more bonus area)
+COST_THRESHOLD_COMPLETE = 0.92      # used when completing missing leg on 3rd platform
+SINGLE_LEG_MAX_ASK = 0.70           # per-leg cap (lowered 07/05 per user): never buy any leg >0.70
+DANGEROUS_GAP_BLOCK = 50            # block dangerous direction when strike_gap >= this
+AGGRESSIVE_GAP_THRESHOLD = 50       # safe direction uses aggressive threshold above this gap
+COOLDOWN_SEC_NORMAL = 10            # cooldown for non-safe trades
+MAX_TRADES_PER_MARKET = 0           # 0 = no cap (per user)
+POLL_SEC = 2
+MAX_FEED_AGE_SEC = 30  # skip iteration if any feed is stale
+
+OPEN_TRADES: Dict[int, dict] = {}
+CLOSED_TRADES: List[dict] = []
+NEXT_TRADE_ID = 1
+LAST_OPEN_TS: Dict[Tuple[str, str], float] = {}
+MARKET_TRADE_COUNT: Dict[str, int] = {}
+
+STATE_FILE = "/root/arb_v4_4way_state.json"
+
+
+def save_state():
+    try:
+        st = {
+            "OPEN_TRADES": OPEN_TRADES,
+            "NEXT_TRADE_ID": NEXT_TRADE_ID,
+            "MARKET_TRADE_COUNT": {f"{k[0]}|{k[1]}": v for k, v in MARKET_TRADE_COUNT.items()} if MARKET_TRADE_COUNT and isinstance(next(iter(MARKET_TRADE_COUNT.keys()), None), tuple) else MARKET_TRADE_COUNT,
+        }
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(st, f, default=str)
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        pass
+
+
+def load_state():
+    global NEXT_TRADE_ID
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        with open(STATE_FILE) as f:
+            st = json.load(f)
+        for tid_s, t in st.get("OPEN_TRADES", {}).items():
+            OPEN_TRADES[int(tid_s)] = t
+        NEXT_TRADE_ID = st.get("NEXT_TRADE_ID", NEXT_TRADE_ID)
+        for k, v in st.get("MARKET_TRADE_COUNT", {}).items():
+            if isinstance(k, str) and "|" in k:
+                a, b = k.split("|", 1)
+                MARKET_TRADE_COUNT[(a, b)] = v
+            else:
+                MARKET_TRADE_COUNT[k] = v
+        print(f"loaded state: {len(OPEN_TRADES)} open, next_id={NEXT_TRADE_ID}")
+    except Exception as e:
+        print(f"load_state failed: {e}")
+
+ANSI_RESET = "\033[0m"
+ANSI_GREEN = "\033[32m"
+ANSI_RED = "\033[31m"
+ANSI_BOLD = "\033[1m"
+ANSI_CYAN = "\033[36m"
+ANSI_YELLOW = "\033[33m"
+
+
+def color_money(v):
+    s = f"${v:+,.2f}"
+    if v > 0:
+        return f"{ANSI_GREEN}{s}{ANSI_RESET}"
+    if v < 0:
+        return f"{ANSI_RED}{s}{ANSI_RESET}"
+    return s
+
+
+def read_header(path):
+    try:
+        with open(path) as fh:
+            return fh.readline().strip().split(",")
+    except Exception:
+        return None
+
+
+def tail_last_row(path, header):
+    try:
+        out = subprocess.run(
+            ["tail", "-1", path], capture_output=True, text=True, timeout=5
+        )
+        line = out.stdout.strip()
+        if not line:
+            return None
+        values = line.split(",")
+        return dict(zip(header, values))
+    except Exception:
+        return None
+
+
+def parse_poly(row):
+    if not row:
+        return None
+    try:
+        return {
+            "platform": "POLY",
+            "epoch": int(row.get("epoch_sec") or 0),
+            "up_ask": float(row.get("up_ask") or 0),
+            "down_ask": float(row.get("down_ask") or 0),
+            "up_usd_avail": float(row.get("up_usd_best") or 0),
+            "down_usd_avail": float(row.get("down_usd_best") or 0),
+            "strike": float(row.get("target_chainlink_at_open") or 0),
+            "market_id": row.get("market_slug", "") or "",
+        }
+    except Exception:
+        return None
+
+
+def parse_kalshi(row):
+    if not row:
+        return None
+    try:
+        ya = float(row.get("yes_ask") or 0)
+        na = float(row.get("no_ask") or 0)
+        ya_sz = float(row.get("yes_ask_size") or 0)
+        return {
+            "platform": "KALSHI",
+            "epoch": int(row.get("epoch_sec") or 0),
+            "up_ask": ya,           # YES = UP analog
+            "down_ask": na,         # NO = DOWN analog
+            "up_usd_avail": ya * ya_sz,
+            "down_usd_avail": na * ya_sz,  # use yes_ask_size as proxy for NO depth
+            "strike": float(row.get("floor_strike") or 0),
+            "market_id": row.get("event_ticker", "") or "",
+        }
+    except Exception:
+        return None
+
+
+def parse_gemini(row):
+    if not row:
+        return None
+    try:
+        return {
+            "platform": "GEMINI",
+            "epoch": int(row.get("epoch_sec") or 0),
+            "up_ask": float(row.get("yes_ask") or 0),
+            "down_ask": float(row.get("no_ask_implied") or 0),
+            "up_usd_avail": float(row.get("yes_ask_usd") or 0),
+            "down_usd_avail": float(row.get("no_ask_usd_buyable") or 0),
+            "strike": float(row.get("strike") or 0),
+            "market_id": row.get("ticker", "") or "",
+        }
+    except Exception:
+        return None
+
+
+def lookup_binance_strike(market_open_epoch):
+    # Predict.fun strike = Binance BTC price at sec_from_start=1 of market open.
+    # Verified 5/5 markets on 08/05 with sub-dollar accuracy.
+    if not market_open_epoch: return None
+    try:
+        out = subprocess.run(["tail","-n","2000",P_PATH], capture_output=True, text=True, timeout=5)
+        if not out.stdout: return None
+        header = read_header(P_PATH)
+        if not header: return None
+        for line in out.stdout.strip().split("\n"):
+            values = line.split(",")
+            if len(values) < len(header): continue
+            row = dict(zip(header, values))
+            try:
+                me = int(row.get("market_epoch") or 0)
+                sec = int(row.get("sec_from_start") or 0)
+                price = float(row.get("binance_price") or 0)
+            except Exception:
+                continue
+            if me == market_open_epoch and sec == 1 and price > 0:
+                return price
+        return None
+    except Exception:
+        return None
+
+
+def parse_predict(row):
+    if not row: return None
+    try:
+        ya = float(row.get("yes_ask") or 0)
+        yb = float(row.get("yes_bid") or 0)
+        e = int(row.get("epoch_sec") or 0)
+        market_open = (e // 900) * 900
+        strike = lookup_binance_strike(market_open) or 0
+        return {
+            "platform": "PREDICT",
+            "epoch": e,
+            "up_ask": ya,
+            "down_ask": (1.0 - yb) if yb > 0 else 999,
+            "up_usd_avail": float(row.get("yes_ask_usd") or 0),
+            "down_usd_avail": float(row.get("no_ask_usd_buyable") or 0),
+            "strike": strike,
+            "market_id": row.get("market_id", "") or "",
+        }
+    except Exception:
+        return None
+
+
+def lookup_predict_winner(market_id):
+    # Predict uses Binance @ sec=1 as strike. Settlement = whether the NEXT
+    # market's strike is above (YES won) or below (NO won) this market's strike.
+    if not market_id: return None
+    try:
+        # Find this Predict market's open epoch by locating its first row
+        out = subprocess.run(["grep", "-m", "1", f",{market_id},", PR_PATH],
+                              capture_output=True, text=True, timeout=10)
+        if not out.stdout: return None
+        first_row = out.stdout.strip().split("\n")[0].split(",")
+        if len(first_row) < 3: return None
+        try:
+            first_epoch = int(first_row[1])
+        except Exception:
+            return None
+        market_open = (first_epoch // 900) * 900
+        s_old = lookup_binance_strike(market_open)
+        s_new = lookup_binance_strike(market_open + 900)
+        if s_old is None or s_new is None: return None
+        if s_new > s_old: return "YES"
+        if s_new < s_old: return "NO"
+        return None
+    except Exception:
+        return None
+
+
+def detect_arb(platforms: List[dict]) -> List[dict]:
+    """For each pair, return BOTH directions, marking each as safe or dangerous.
+    Safe = UP from lower-strike + DOWN from higher-strike (bonus zone possible).
+    Dangerous = UP from higher-strike + DOWN from lower-strike (both-lose risk
+    if BTC ends in the strike gap)."""
+    valid = [p for p in platforms if p and p.get("strike", 0) > 0]
+    opps = []
+    for i in range(len(valid)):
+        for j in range(i + 1, len(valid)):
+            a, b = valid[i], valid[j]
+            if a["strike"] < b["strike"]:
+                lower, higher = a, b
+            else:
+                lower, higher = b, a
+            strike_gap = higher["strike"] - lower["strike"]
+            third = next(
+                (p for p in valid if p["platform"] not in (lower["platform"], higher["platform"])),
+                None,
+            )
+            # SAFE direction: UP@lower + DOWN@higher (BTC in middle = both win)
+            up_ask = lower["up_ask"]; down_ask = higher["down_ask"]
+            if up_ask > 0 and down_ask > 0 and up_ask < 1 and down_ask < 1:
+                opps.append({
+                    "pair_label": f"UP@{lower['platform']}+DOWN@{higher['platform']}",
+                    "direction_safety": "safe",
+                    "leg_up": lower, "leg_down": higher, "third": third,
+                    "strike_gap": strike_gap,
+                    "up_ask": up_ask, "down_ask": down_ask,
+                    "cost": up_ask + down_ask,
+                })
+            # DANGEROUS direction: UP@higher + DOWN@lower (BTC in middle = both LOSE)
+            up_ask = higher["up_ask"]; down_ask = lower["down_ask"]
+            if up_ask > 0 and down_ask > 0 and up_ask < 1 and down_ask < 1:
+                opps.append({
+                    "pair_label": f"UP@{higher['platform']}+DOWN@{lower['platform']}",
+                    "direction_safety": "dangerous",
+                    "leg_up": higher, "leg_down": lower, "third": third,
+                    "strike_gap": strike_gap,
+                    "up_ask": up_ask, "down_ask": down_ask,
+                    "cost": up_ask + down_ask,
+                })
+    opps.sort(key=lambda o: o["cost"])
+    return opps
+
+
+def attempt_completion(target_shares: float, up_filled: float, down_filled: float,
+                       opp: dict) -> Tuple[float, float, float, float, float, str]:
+    """If either leg under-filled, try to complete on the third platform same side.
+    Returns (final_up_shares, final_down_shares, third_up_shares, third_down_shares,
+    total_cost_paid, completion_note)."""
+    up_short = target_shares - up_filled
+    down_short = target_shares - down_filled
+    third = opp.get("third")
+
+    third_up_shares = 0.0
+    third_down_shares = 0.0
+    third_up_cost = 0.0
+    third_down_cost = 0.0
+    note = ""
+
+    if (up_short > 0 or down_short > 0) and third:
+        if up_short > 0 and third["up_ask"] > 0:
+            new_cost = third["up_ask"] + opp["down_ask"]
+            if new_cost <= COST_THRESHOLD_COMPLETE:
+                affordable_shares = min(up_short, third["up_usd_avail"] / max(third["up_ask"], 0.01))
+                third_up_shares = affordable_shares
+                third_up_cost = third_up_shares * third["up_ask"]
+        if down_short > 0 and third["down_ask"] > 0:
+            new_cost = opp["up_ask"] + third["down_ask"]
+            if new_cost <= COST_THRESHOLD_COMPLETE:
+                affordable_shares = min(down_short, third["down_usd_avail"] / max(third["down_ask"], 0.01))
+                third_down_shares = affordable_shares
+                third_down_cost = third_down_shares * third["down_ask"]
+        if third_up_shares > 0 or third_down_shares > 0:
+            note = f"COMPLETED_ON_{third['platform']}"
+
+    final_up = up_filled + third_up_shares
+    final_down = down_filled + third_down_shares
+
+    if abs(final_up - final_down) > 0.01:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, "ABORTED_imbalance"
+
+    total_cost = (up_filled * opp["up_ask"]
+                  + down_filled * opp["down_ask"]
+                  + third_up_cost + third_down_cost)
+    return final_up, final_down, third_up_shares, third_down_shares, total_cost, note
+
+
+TRADE_COLS = [
+    "trade_id", "open_ts", "pair_label", "direction_safety",
+    # is_shadow=1 means dangerous direction — NOT actually traded, just tracked
+    # for analysis. Filter by this column to separate real vs theoretical PnL.
+    "is_shadow",
+    # All 3 platform strikes captured at open time, regardless of which is in the trade
+    "poly_strike_open", "kalshi_strike_open", "gemini_strike_open",
+    "up_platform", "up_market_id", "up_strike", "up_ask",
+    "down_platform", "down_market_id", "down_strike", "down_ask",
+    "third_platform", "third_market_id", "third_strike",
+    "strike_gap", "cost_open",
+    "target_shares", "up_shares_filled", "down_shares_filled",
+    "third_up_shares", "third_down_shares",
+    "invest_total", "completion_note",
+    "close_ts", "btc_final", "winner_pattern",
+    "up_payout", "down_payout", "third_up_payout", "third_down_payout",
+    "total_payout", "pnl", "pnl_pct",
+]
+
+
+MARKET_REPORT_COLS = [
+    "report_ts", "market_window_start", "market_window_end",
+    "poly_market", "poly_strike", "poly_winner_side",
+    "kalshi_market", "kalshi_strike", "kalshi_winner_side",
+    "gemini_market", "gemini_strike", "gemini_winner_side",
+    "btc_final_binance",
+    "n_trades_total", "n_trades_safe", "n_trades_dangerous",
+    "n_both_win_bonus", "n_both_lost_danger",
+    "total_invested", "total_pnl", "roi_pct",
+    "avg_cost_open", "avg_strike_gap",
+]
+
+
+def init_log():
+    if not os.path.exists(LOG):
+        with open(LOG, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(TRADE_COLS)
+    if not os.path.exists(MARKET_REPORT):
+        with open(MARKET_REPORT, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(MARKET_REPORT_COLS)
+
+
+def write_trade(t):
+    row = [t.get(c, "") for c in TRADE_COLS]
+    with open(LOG, "a", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerow(row)
+
+
+# Market reports: track which 15-min window is fully settled, then write a summary.
+# Window key = floor(epoch / 900). Each market gets one report row.
+REPORTED_WINDOWS = set()
+
+
+def emit_market_report(window_key: int):
+    """Aggregate all trades that closed in this 15-min window across all 3 platforms."""
+    if window_key in REPORTED_WINDOWS:
+        return
+    # Collect trades whose lower or higher market belongs to this window
+    window_start = window_key * 900
+    window_end = window_start + 900
+    trades_in_window = []
+    for t in CLOSED_TRADES:
+        # Use any leg's market epoch heuristic — fall back to close_ts
+        try:
+            ct = datetime.strptime(t.get("close_ts", ""), "%Y-%m-%d %H:%M:%S")
+            ce = int(ct.timestamp())
+        except Exception:
+            continue
+        # Match by close epoch falling in this window
+        if window_start <= ce < window_end + 60:  # +60 grace for late settles
+            trades_in_window.append(t)
+    if not trades_in_window:
+        return
+
+    # Aggregate
+    poly_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "POLY" else
+                    (float(t.get("down_strike") or 0) if t.get("down_platform") == "POLY" else 0)
+                    for t in trades_in_window]
+    poly_strikes = [s for s in poly_strikes if s > 0]
+    kal_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "KALSHI" else
+                   (float(t.get("down_strike") or 0) if t.get("down_platform") == "KALSHI" else 0)
+                   for t in trades_in_window]
+    kal_strikes = [s for s in kal_strikes if s > 0]
+    gem_strikes = [float(t.get("up_strike") or 0) if t.get("up_platform") == "GEMINI" else
+                   (float(t.get("down_strike") or 0) if t.get("down_platform") == "GEMINI" else 0)
+                   for t in trades_in_window]
+    gem_strikes = [s for s in gem_strikes if s > 0]
+
+    poly_market = next((t.get("up_market_id") if t.get("up_platform") == "POLY"
+                        else t.get("down_market_id") if t.get("down_platform") == "POLY" else None
+                        for t in trades_in_window), "")
+    kal_market = next((t.get("up_market_id") if t.get("up_platform") == "KALSHI"
+                       else t.get("down_market_id") if t.get("down_platform") == "KALSHI" else None
+                       for t in trades_in_window), "")
+    gem_market = next((t.get("up_market_id") if t.get("up_platform") == "GEMINI"
+                       else t.get("down_market_id") if t.get("down_platform") == "GEMINI" else None
+                       for t in trades_in_window), "")
+
+    poly_winner = lookup_poly_winner(poly_market) if poly_market else ""
+    kal_winner = lookup_kalshi_winner(kal_market) if kal_market else ""
+    gem_winner = lookup_gemini_winner(gem_market) if gem_market else ""
+
+    btc_final = ""
+    try:
+        with open(PM_OUTCOMES) as fh:
+            for r in csv.DictReader(fh):
+                if r.get("market_slug") == poly_market:
+                    btc_final = r.get("final_binance_price", "")
+                    break
+    except Exception:
+        pass
+
+    n_total = len(trades_in_window)
+    n_safe = sum(1 for t in trades_in_window if t.get("direction_safety") == "safe")
+    n_dangerous = n_total - n_safe
+    n_bonus = sum(1 for t in trades_in_window if t.get("winner_pattern") == "BOTH_WIN_BONUS")
+    n_lost_danger = sum(1 for t in trades_in_window if t.get("winner_pattern") == "BOTH_LOST_DANGER")
+    total_inv = sum(float(t.get("invest_total") or 0) for t in trades_in_window)
+    total_pnl = sum(float(t.get("pnl") or 0) for t in trades_in_window)
+    roi = total_pnl / total_inv * 100 if total_inv > 0 else 0
+    avg_cost = sum(float(t.get("cost_open") or 0) for t in trades_in_window) / n_total
+    avg_gap = sum(float(t.get("strike_gap") or 0) for t in trades_in_window) / n_total
+
+    row = {
+        "report_ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "market_window_start": datetime.utcfromtimestamp(window_start).strftime("%Y-%m-%d %H:%M:%S"),
+        "market_window_end": datetime.utcfromtimestamp(window_end).strftime("%Y-%m-%d %H:%M:%S"),
+        "poly_market": poly_market,
+        "poly_strike": round(poly_strikes[0], 2) if poly_strikes else "",
+        "poly_winner_side": poly_winner,
+        "kalshi_market": kal_market,
+        "kalshi_strike": round(kal_strikes[0], 2) if kal_strikes else "",
+        "kalshi_winner_side": kal_winner,
+        "gemini_market": gem_market,
+        "gemini_strike": round(gem_strikes[0], 2) if gem_strikes else "",
+        "gemini_winner_side": gem_winner,
+        "btc_final_binance": btc_final,
+        "n_trades_total": n_total,
+        "n_trades_safe": n_safe,
+        "n_trades_dangerous": n_dangerous,
+        "n_both_win_bonus": n_bonus,
+        "n_both_lost_danger": n_lost_danger,
+        "total_invested": round(total_inv, 2),
+        "total_pnl": round(total_pnl, 2),
+        "roi_pct": round(roi, 2),
+        "avg_cost_open": round(avg_cost, 4),
+        "avg_strike_gap": round(avg_gap, 2),
+    }
+    out_row = [row.get(c, "") for c in MARKET_REPORT_COLS]
+    with open(MARKET_REPORT, "a", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerow(out_row)
+    REPORTED_WINDOWS.add(window_key)
+    print(f"MARKET REPORT for window {row['market_window_start']}: "
+          f"{n_total} trades (safe={n_safe} danger={n_dangerous}), "
+          f"PnL=${total_pnl:+.2f} ROI={roi:+.1f}%")
+
+
+def lookup_poly_winner(market_id: str) -> Optional[str]:
+    """Returns 'UP', 'DOWN', or None. Polymarket settles by Chainlink."""
+    try:
+        with open(PM_OUTCOMES) as fh:
+            for r in csv.DictReader(fh):
+                if r.get("market_slug") == market_id:
+                    return r.get("winner_side") or None
+    except Exception:
+        pass
+    return None
+
+
+def lookup_kalshi_winner(market_ticker: str) -> Optional[str]:
+    # Strike-comparison method: read this Kalshi market's strike + the NEXT
+    # consecutive Kalshi market's strike from markets.csv. If next > this,
+    # YES won (BTC went up). If next < this, NO won.
+    try:
+        markets_path = "/root/data_kalshi_btc_15m/markets.csv"
+        with open(markets_path) as f:
+            rows = list(csv.DictReader(f))
+        this_row = next((r for r in rows if r.get("market_ticker") == market_ticker), None)
+        if not this_row: return None
+        this_close = this_row.get("close_time")
+        next_row = next((r for r in rows if r.get("open_time") == this_close), None)
+        if not next_row: return None
+        s_old = float(this_row.get("floor_strike") or 0)
+        s_new = float(next_row.get("floor_strike") or 0)
+        if s_old <= 0 or s_new <= 0: return None
+        if s_new > s_old: return "YES"
+        if s_new < s_old: return "NO"
+        return None
+    except Exception:
+        return None
+
+
+def lookup_gemini_winner(ticker: str) -> Optional[str]:
+    # Strike-comparison method: this Gemini market's strike vs NEXT market's strike.
+    try:
+        markets_path = "/root/data_gemini_btc_15m/markets.csv"
+        with open(markets_path) as f:
+            rows = list(csv.DictReader(f))
+        this_row = next((r for r in rows if r.get("ticker") == ticker), None)
+        if not this_row: return None
+        this_close = this_row.get("close_time")
+        next_row = next((r for r in rows if r.get("open_time") == this_close), None)
+        if not next_row: return None
+        s_old = float(this_row.get("strike") or 0)
+        s_new = float(next_row.get("strike") or 0)
+        if s_old <= 0 or s_new <= 0: return None
+        if s_new > s_old: return "YES"
+        if s_new < s_old: return "NO"
+        return None
+    except Exception:
+        return None
+
+
+def winner_for_platform(platform: str, market_id: str, side: str) -> Optional[bool]:
+    """side: 'UP' if we bought UP/YES; 'DOWN' if we bought DOWN/NO.
+    Returns True if our side won, False if it lost, None if not yet settled."""
+    if platform == "POLY":
+        winner = lookup_poly_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "UP" and side == "UP") or (winner == "DOWN" and side == "DOWN")
+    if platform == "KALSHI":
+        winner = lookup_kalshi_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "YES" and side == "UP") or (winner == "NO" and side == "DOWN")
+    if platform == "GEMINI":
+        winner = lookup_gemini_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "YES" and side == "UP") or (winner == "NO" and side == "DOWN")
+    if platform == "PREDICT":
+        winner = lookup_predict_winner(market_id)
+        if winner is None:
+            return None
+        return (winner == "YES" and side == "UP") or (winner == "NO" and side == "DOWN")
+    return None
+
+
+def settle_trade(tid: int) -> bool:
+    """Settle using EACH platform's OWN oracle independently.
+    Each leg checks its own platform's settled price."""
+    t = OPEN_TRADES[tid]
+
+    up_won = winner_for_platform(t["up_platform"], t["up_market_id"], "UP")
+    down_won = winner_for_platform(t["down_platform"], t["down_market_id"], "DOWN")
+    if up_won is None or down_won is None:
+        return False
+
+    third_up_won = None
+    third_down_won = None
+    if t.get("third_up_shares", 0) > 0 and t.get("third_platform"):
+        third_up_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "UP")
+    if t.get("third_down_shares", 0) > 0 and t.get("third_platform"):
+        third_down_won = winner_for_platform(t["third_platform"], t.get("third_market_id", ""), "DOWN")
+
+    # Pattern depends on outcomes vs the trade's safety direction
+    if up_won and down_won:
+        pattern = "BOTH_WIN_BONUS" if t.get("direction_safety") == "safe" else "BOTH_WIN_UNEXPECTED"
+    elif up_won and not down_won:
+        pattern = "UP_WON_ONLY"
+    elif not up_won and down_won:
+        pattern = "DOWN_WON_ONLY"
+    else:
+        pattern = "BOTH_LOST_DANGER" if t.get("direction_safety") == "dangerous" else "BOTH_LOST_UNEXPECTED"
+
+    up_pay = t["up_shares_filled"] if up_won else 0.0
+    down_pay = t["down_shares_filled"] if down_won else 0.0
+    third_up_pay = t.get("third_up_shares", 0) if (third_up_won is True) else 0.0
+    third_down_pay = t.get("third_down_shares", 0) if (third_down_won is True) else 0.0
+    total = up_pay + down_pay + third_up_pay + third_down_pay
+    pnl = total - t["invest_total"]
+    pnl_pct = (pnl / t["invest_total"]) * 100 if t["invest_total"] else 0
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    t.update({
+        "close_ts": now_ts,
+        "btc_final": "",
+        "winner_pattern": pattern,
+        "up_payout": round(up_pay, 4),
+        "down_payout": round(down_pay, 4),
+        "third_up_payout": round(third_up_pay, 4),
+        "third_down_payout": round(third_down_pay, 4),
+        "total_payout": round(total, 4),
+        "pnl": round(pnl, 4),
+        "pnl_pct": round(pnl_pct, 2),
+    })
+    write_trade(t)
+    CLOSED_TRADES.append(t)
+    print(f"SETTLED #{tid} [{t.get('direction_safety')}] {t['pair_label']} pattern={pattern} pnl={color_money(pnl)} ({pnl_pct:+.1f}%)")
+    del OPEN_TRADES[tid]
+    return True
+
+
+def render_status(p, k, g, opps):
+    width = 110
+    out = ["\033[H\033[2J\033[3J\033[?25l"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    out.append(f"{ANSI_BOLD}ARB_V4_3WAY (rules per user 06/05 evening){ANSI_RESET}   "
+               f"mode={ANSI_CYAN}DRY-RUN{ANSI_RESET}  ${INVEST_PER_SIDE_TARGET:.0f}/side")
+    out.append(f"  rules: cost<={COST_THRESHOLD_NORMAL} normal | <={COST_THRESHOLD_AGGRESSIVE} "
+               f"if SAFE + gap>={AGGRESSIVE_GAP_THRESHOLD}$  |  per-leg<={SINGLE_LEG_MAX_ASK}  |  "
+               f"BLOCK dangerous when gap>={DANGEROUS_GAP_BLOCK}$")
+    out.append("=" * width)
+    out.append(f"TIME: {now}")
+    out.append("")
+    for pf in [p, k, g]:
+        if not pf:
+            continue
+        out.append(f"  {pf['platform']:<8} strike=${pf['strike']:>10,.2f}  "
+                   f"UP_ask={pf['up_ask']:.3f} ${pf['up_usd_avail']:>7.0f}  "
+                   f"DN_ask={pf['down_ask']:.3f} ${pf['down_usd_avail']:>7.0f}  "
+                   f"market={pf['market_id'][-22:]}")
+    out.append("-" * width)
+    out.append(f"{ANSI_BOLD}OPPORTUNITIES (all 6 directions, safe + dangerous):{ANSI_RESET}")
+    if not opps:
+        out.append("  (waiting for all 3 feeds with valid strikes)")
+    else:
+        for o in opps:
+            is_safe = o["direction_safety"] == "safe"
+            gap = o["strike_gap"]
+            # Compute the live limit for this opp
+            if (not is_safe) and gap >= DANGEROUS_GAP_BLOCK:
+                live_limit = 0  # blocked
+            elif is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
+                live_limit = COST_THRESHOLD_AGGRESSIVE
+            else:
+                live_limit = COST_THRESHOLD_NORMAL
+            if live_limit == 0:
+                mark = f"  {ANSI_RED}<- BLOCKED (dangerous + gap>={DANGEROUS_GAP_BLOCK}){ANSI_RESET}"
+            elif o["cost"] <= live_limit and o["up_ask"] <= SINGLE_LEG_MAX_ASK and o["down_ask"] <= SINGLE_LEG_MAX_ASK:
+                mark = f"  {ANSI_GREEN}{ANSI_BOLD}<- OPEN (limit {live_limit}){ANSI_RESET}"
+            else:
+                mark = f"  (limit {live_limit})"
+            safety_tag = "[BTOC]" if is_safe else "[MSKN]"
+            out.append(f"  {safety_tag} {o['pair_label']:<32} cost={o['cost']:.3f}  "
+                       f"min_profit={(1-o['cost'])*100:+.1f}%  "
+                       f"strike_gap=${gap:.0f}{mark}")
+    out.append("-" * width)
+    out.append(f"{ANSI_BOLD}OPEN TRADES: {len(OPEN_TRADES)}{ANSI_RESET}")
+    if OPEN_TRADES:
+        for tid, t in sorted(OPEN_TRADES.items()):
+            safety_tag = "[BTOC]" if t.get("direction_safety") == "safe" else "[MSKN]"
+            out.append(f"  #{tid:>3} {safety_tag} {t['pair_label']}  open={t['open_ts']}  "
+                       f"cost={t['cost_open']:.3f}  shares={t['target_shares']:.1f}  "
+                       f"completion={t.get('completion_note','none')}")
+    out.append("-" * width)
+    n = len(CLOSED_TRADES)
+    out.append(f"{ANSI_BOLD}CLOSED: {n} (last 8){ANSI_RESET}")
+    for t in CLOSED_TRADES[-8:]:
+        try:
+            pnl_val = float(t.get("pnl", 0) or 0)
+            pnl_pct_val = float(t.get("pnl_pct", 0) or 0)
+        except Exception:
+            pnl_val = 0.0; pnl_pct_val = 0.0
+        out.append(f"  #{t['trade_id']:>3} [{t.get('direction_safety','?'):<9}] {t['pair_label']:<32} "
+                   f"{t.get('winner_pattern',''):<20}  "
+                   f"PnL={color_money(pnl_val)} ({pnl_pct_val:+.1f}%)")
+    out.append("=" * width)
+    if CLOSED_TRADES:
+        def _f(v):
+            try: return float(v or 0)
+            except: return 0.0
+        # Split real vs shadow
+        real = [t for t in CLOSED_TRADES if t.get("is_shadow", 0) in (0, "0", "")]
+        shadow = [t for t in CLOSED_TRADES if t.get("is_shadow", 0) in (1, "1")]
+
+        def _agg(rows):
+            inv = sum(_f(t.get("invest_total")) for t in rows)
+            pay = sum(_f(t.get("total_payout")) for t in rows)
+            pnl = pay - inv
+            w = sum(1 for t in rows if _f(t.get("pnl")) > 0)
+            l = sum(1 for t in rows if _f(t.get("pnl")) < 0)
+            bonus = sum(1 for t in rows if "BOTH_WIN" in t.get("winner_pattern", ""))
+            both_lost = sum(1 for t in rows if "BOTH_LOST" in t.get("winner_pattern", ""))
+            return len(rows), w, l, inv, pnl, bonus, both_lost
+
+        n_r, w_r, l_r, inv_r, pnl_r, bonus_r, lost_r = _agg(real)
+        n_s, w_s, l_s, inv_s, pnl_s, bonus_s, lost_s = _agg(shadow)
+
+        out.append(f"{ANSI_BOLD}אמיתי (כיוון בטוח, נסחר):{ANSI_RESET}")
+        if n_r > 0:
+            roi_r = pnl_r/inv_r*100 if inv_r else 0
+            out.append(f"  עסקאות={n_r}  W={w_r} L={l_r}  בונוס={bonus_r}  "
+                       f"השקעה=${inv_r:.0f}  PnL={color_money(pnl_r)} ({roi_r:+.1f}%)")
+        else:
+            out.append("  אין עסקאות סגורות")
+        out.append(f"{ANSI_BOLD}צל (כיוון מסוכן, רק לניתוח):{ANSI_RESET}")
+        if n_s > 0:
+            roi_s = pnl_s/inv_s*100 if inv_s else 0
+            out.append(f"  עסקאות={n_s}  W={w_s} L={l_s}  שניהם הפסידו={lost_s}  "
+                       f"השקעה_תיאורטית=${inv_s:.0f}  PnL_תיאורטי={color_money(pnl_s)} ({roi_s:+.1f}%)")
+        else:
+            out.append("  אין עסקאות צל סגורות")
+    out.append("Ctrl+C to stop.")
+    sys.stdout.write("\n".join(out) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    global NEXT_TRADE_ID
+    p_header = read_header(P_PATH)
+    k_header = read_header(K_PATH)
+    g_header = read_header(G_PATH)
+    pr_header = read_header(PR_PATH)
+    if not (p_header and k_header and g_header and pr_header):
+        print(f"ERROR: cannot read all 4 headers")
+        return
+    init_log()
+    load_state()
+    while True:
+        try:
+            p = parse_poly(tail_last_row(P_PATH, p_header))
+            k = parse_kalshi(tail_last_row(K_PATH, k_header))
+            g = parse_gemini(tail_last_row(G_PATH, g_header))
+            pr = parse_predict(tail_last_row(PR_PATH, pr_header))
+            now_e = int(time.time())
+            ages = {
+                "POLY":    now_e - (p["epoch"]  if p  else 0),
+                "KALSHI":  now_e - (k["epoch"]  if k  else 0),
+                "GEMINI":  now_e - (g["epoch"]  if g  else 0),
+                "PREDICT": now_e - (pr["epoch"] if pr else 0),
+            }
+            stale = {n: a for n, a in ages.items() if a > MAX_FEED_AGE_SEC}
+            if stale:
+                print(f"[STALE] skipping iteration: {stale}", flush=True)
+                time.sleep(POLL_SEC)
+                continue
+            opps = detect_arb([p, k, g, pr])
+            now_unix = time.time()
+            for o in opps:
+                is_safe = (o["direction_safety"] == "safe")
+                gap = o["strike_gap"]
+
+                # Per-leg cap (applies to both real and shadow)
+                if o["up_ask"] > SINGLE_LEG_MAX_ASK or o["down_ask"] > SINGLE_LEG_MAX_ASK:
+                    continue
+
+                # PILOT MODE (07/05): trade everything regardless of direction.
+                # Tag direction_safety in CSV for post-hoc analysis but no blocking.
+                # This was changed from "shadow only" to capture all opportunities
+                # — V4 was missing all Poly+Kalshi trades V2 was making profitably.
+                is_shadow = False  # everything is real now
+
+                # Variable cost threshold: aggressive 0.96 for safe + large gap; normal 0.90 otherwise
+                if is_safe and gap >= AGGRESSIVE_GAP_THRESHOLD:
+                    cost_limit = COST_THRESHOLD_AGGRESSIVE
+                else:
+                    cost_limit = COST_THRESHOLD_NORMAL
+                if o["cost"] > cost_limit:
+                    continue
+
+                pair_label = o["pair_label"]
+                market_combo = f"{o['leg_up']['market_id']}|{o['leg_down']['market_id']}"
+                cd_key = (pair_label, market_combo)
+
+                # Throttle ONLY shadow (dangerous). Real safe trades are unlimited.
+                if is_shadow:
+                    if now_unix - LAST_OPEN_TS.get(cd_key, 0) < COOLDOWN_SEC_NORMAL:
+                        continue
+                # Per-market cap (0 = disabled)
+                if MAX_TRADES_PER_MARKET > 0 and MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) >= MAX_TRADES_PER_MARKET:
+                    continue
+                up_avail = o["leg_up"]["up_usd_avail"]
+                down_avail = o["leg_down"]["down_usd_avail"]
+                if up_avail <= 0 or down_avail <= 0:
+                    continue
+                usable_per_side = min(up_avail, down_avail) * DEPTH_USE_FRACTION
+                invest_per_side = min(INVEST_PER_SIDE_TARGET, usable_per_side)
+                if invest_per_side < INVEST_PER_SIDE_MIN:
+                    continue
+                max_price = max(o["up_ask"], o["down_ask"])
+                target_shares = invest_per_side / max_price
+                up_max = up_avail / max(o["up_ask"], 0.01)
+                down_max = down_avail / max(o["down_ask"], 0.01)
+                up_filled = min(target_shares, up_max * DEPTH_USE_FRACTION)
+                down_filled = min(target_shares, down_max * DEPTH_USE_FRACTION)
+                final_u, final_d, t_u, t_d, total_cost, note = attempt_completion(
+                    target_shares, up_filled, down_filled, o
+                )
+                if note == "ABORTED_imbalance":
+                    continue
+                if final_u < 0.01:
+                    continue
+                LAST_OPEN_TS[cd_key] = now_unix
+                MARKET_TRADE_COUNT[(pair_label, market_combo)] = MARKET_TRADE_COUNT.get((pair_label, market_combo), 0) + 1
+                open_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                third = o.get("third") or {}
+                OPEN_TRADES[NEXT_TRADE_ID] = {
+                    "trade_id": NEXT_TRADE_ID,
+                    "open_ts": open_ts,
+                    "pair_label": pair_label,
+                    "direction_safety": o["direction_safety"],
+                    "is_shadow": 1 if is_shadow else 0,
+                    "poly_strike_open": round(p["strike"], 2) if p else "",
+                    "kalshi_strike_open": round(k["strike"], 2) if k else "",
+                    "gemini_strike_open": round(g["strike"], 2) if g else "",
+                    "up_platform": o["leg_up"]["platform"],
+                    "up_market_id": o["leg_up"]["market_id"],
+                    "up_strike": o["leg_up"]["strike"],
+                    "up_ask": round(o["up_ask"], 4),
+                    "down_platform": o["leg_down"]["platform"],
+                    "down_market_id": o["leg_down"]["market_id"],
+                    "down_strike": o["leg_down"]["strike"],
+                    "down_ask": round(o["down_ask"], 4),
+                    "third_platform": third.get("platform", ""),
+                    "third_strike": third.get("strike", ""),
+                    "third_market_id": third.get("market_id", ""),
+                    "strike_gap": round(o["strike_gap"], 2),
+                    "cost_open": round(o["cost"], 4),
+                    "target_shares": round(target_shares, 4),
+                    "up_shares_filled": round(up_filled, 4),
+                    "down_shares_filled": round(down_filled, 4),
+                    "third_up_shares": round(t_u, 4),
+                    "third_down_shares": round(t_d, 4),
+                    "invest_total": round(total_cost, 4),
+                    "completion_note": note,
+                }
+                NEXT_TRADE_ID += 1
+            for tid in list(OPEN_TRADES.keys()):
+                if tid in OPEN_TRADES:
+                    settle_trade(tid)
+            # Market report: trigger emit for any window that's >5min past close
+            # so we know all trades had time to settle.
+            now_epoch = int(time.time())
+            current_window = now_epoch // 900
+            for prev_window in [current_window - 1, current_window - 2]:
+                if prev_window in REPORTED_WINDOWS:
+                    continue
+                # Only emit once enough grace passed
+                window_end = (prev_window + 1) * 900
+                if now_epoch - window_end > 300:  # 5 min after window closed
+                    emit_market_report(prev_window)
+            render_status(p, k, g, opps)
+            save_state()
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}")
+        time.sleep(POLL_SEC)
+
+
+if __name__ == "__main__":
+    main()

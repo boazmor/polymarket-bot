@@ -29,7 +29,6 @@ from typing import Optional
 
 P = "/root/data_btc_15m_research/combined_per_second.csv"
 PR = "/root/data_predict_btc_15m/combined_per_second.csv"
-PYTH = "/root/data_pyth_btc/per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v5_predict_trades.csv"
 
@@ -40,11 +39,41 @@ SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_MARKET = 15
 COOLDOWN_SEC = 5
 POLL_SEC = 2
-MAX_FEED_AGE_SEC = 30
+MAX_FEED_AGE_SEC = 10
 
 OPEN_TRADES = {}
 CLOSED_TRADES = []
 NEXT_TRADE_ID = 1
+
+STATE_FILE = "/root/arb_v5_basic_state.json"
+
+
+def save_state():
+    try:
+        st = {"OPEN_TRADES": OPEN_TRADES, "NEXT_TRADE_ID": NEXT_TRADE_ID}
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            import json
+            json.dump(st, f, default=str)
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        pass
+
+
+def load_state():
+    global NEXT_TRADE_ID
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        import json
+        with open(STATE_FILE) as f:
+            st = json.load(f)
+        for tid_s, t in st.get("OPEN_TRADES", {}).items():
+            OPEN_TRADES[int(tid_s)] = t
+        NEXT_TRADE_ID = st.get("NEXT_TRADE_ID", NEXT_TRADE_ID)
+        print(f"loaded state: {len(OPEN_TRADES)} open, next_id={NEXT_TRADE_ID}")
+    except Exception as e:
+        print(f"load_state failed: {e}")
 ANSI_RESET = "\033[0m"
 ANSI_GREEN = "\033[32m"
 ANSI_RED = "\033[31m"
@@ -131,44 +160,31 @@ def lookup_poly_winner(slug):
     return None
 
 
-def lookup_pyth_target(market_open_epoch):
-    """Returns the REAL Predict.fun target — Pyth BTC/USD at market open.
-    Predict.fun captures the Pyth price 2-5 seconds AFTER the nominal 15-min
-    boundary because that's when the BNB block confirms the open. So we
-    average Pyth samples in [open+1, open+8] to best match Predict's actual
-    block-confirmation moment. Falls back to closest within 10s if window empty."""
+def lookup_binance_target(market_open_epoch):
+    # Predict.fun strike = Binance BTC price at sec_from_start=1 of market open.
+    # Verified 5/5 markets on 08/05 with sub-dollar accuracy.
     if not market_open_epoch:
         return None
     try:
-        out = subprocess.run(["tail", "-n", "2000", PYTH], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["tail", "-n", "2000", P], capture_output=True, text=True, timeout=5)
         if not out.stdout:
             return None
-        header = read_header(PYTH)
+        header = read_header(P)
         if not header:
             return None
-        prices_in_window = []
-        fallback_price = None; fallback_diff = 999
         for line in out.stdout.strip().split("\n"):
             values = line.split(",")
             if len(values) < len(header):
                 continue
             row = dict(zip(header, values))
             try:
-                e = int(row.get("epoch_sec") or 0)
-                price = float(row.get("btc_price") or 0)
+                me = int(row.get("market_epoch") or 0)
+                sec = int(row.get("sec_from_start") or 0)
+                price = float(row.get("binance_price") or 0)
             except Exception:
                 continue
-            if price <= 0:
-                continue
-            offset = e - market_open_epoch
-            if 1 <= offset <= 8:
-                prices_in_window.append(price)
-            if abs(offset) < fallback_diff:
-                fallback_diff = abs(offset); fallback_price = price
-        if prices_in_window:
-            return sum(prices_in_window) / len(prices_in_window)
-        if fallback_diff <= 10:
-            return fallback_price
+            if me == market_open_epoch and sec == 1 and price > 0:
+                return price
         return None
     except Exception:
         return None
@@ -183,37 +199,31 @@ def derive_market_open_epoch(epoch_now):
 
 
 def lookup_predict_winner(market_id):
-    """Predict.fun settles via Pyth. After settlement, last_trade_price (or final
-    yes_bid/yes_ask) collapses to ~1.00 (YES won = UP) or ~0.00 (NO won = DOWN).
-    Search recent rows of recorder for this market_id."""
+    # Strike-comparison method: Predict's strike = Binance @ sec=1. The next
+    # 15-min market's strike is the settlement price of this one.
     if not market_id:
         return None
     try:
-        out = subprocess.run(["tail", "-n", "5000", PR], capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["grep", "-m", "1", f",{market_id},", PR],
+                              capture_output=True, text=True, timeout=10)
         if not out.stdout:
             return None
-        header = read_header(PR)
-        if not header:
+        first_row = out.stdout.strip().split("\n")[0].split(",")
+        if len(first_row) < 3:
             return None
-        # Look backwards through recent rows for this market_id, find the last "decisive" price
-        for line in reversed(out.stdout.strip().split("\n")):
-            values = line.split(",")
-            if len(values) < len(header):
-                continue
-            row = dict(zip(header, values))
-            if str(row.get("market_id", "")) != str(market_id):
-                continue
-            try:
-                ya = float(row.get("yes_ask") or 0)
-                yb = float(row.get("yes_bid") or 0)
-            except Exception:
-                continue
-            # YES won: yes_bid near 1.00 (book often one-sided after settle)
-            if yb >= 0.97:
-                return "YES"
-            # NO won: yes_ask near 0 (book often one-sided after settle)
-            if ya > 0 and ya <= 0.03:
-                return "NO"
+        try:
+            first_epoch = int(first_row[1])
+        except Exception:
+            return None
+        market_open = (first_epoch // 900) * 900
+        s_old = lookup_binance_target(market_open)
+        s_new = lookup_binance_target(market_open + 900)
+        if s_old is None or s_new is None:
+            return None
+        if s_new > s_old:
+            return "YES"
+        if s_new < s_old:
+            return "NO"
         return None
     except Exception:
         return None
@@ -317,13 +327,13 @@ def render_status(p, pr):
     out.append("-" * width)
     if p and pr:
         # Real Predict target via Pyth at the 15-min boundary
-        pyth_target = lookup_pyth_target(derive_market_open_epoch(pr.get('epoch')))
+        binance_target = lookup_binance_target(derive_market_open_epoch(pr.get('epoch')))
         gap_str = ""
-        if pyth_target is not None and p['tgt']:
-            gap_str = f"  gap=${abs(p['tgt']-pyth_target):.0f}"
+        if binance_target is not None and p['tgt']:
+            gap_str = f"  gap=${abs(p['tgt']-binance_target):.0f}"
         out.append(f"  POLY    UP={p['ua']:.3f} DOWN={p['da']:.3f}  target={p['tgt']:.0f}  market={p['slug'][-25:]}")
-        pyth_str = f"{pyth_target:.0f}" if pyth_target else "n/a"
-        out.append(f"  PREDICT YES={pr['yes_ask']:.3f} bid={pr['yes_bid']:.3f}  NO_implied={pr['no_ask_implied']:.3f}  pyth_target={pyth_str}{gap_str}")
+        pyth_str = f"{binance_target:.0f}" if binance_target else "n/a"
+        out.append(f"  PREDICT YES={pr['yes_ask']:.3f} bid={pr['yes_bid']:.3f}  NO_implied={pr['no_ask_implied']:.3f}  binance_target={pyth_str}{gap_str}")
         cost_a = p['ua'] + pr['no_ask_implied']
         cost_b = p['da'] + pr['yes_ask']
         def mark(c):
@@ -367,6 +377,7 @@ def main():
         print("ERROR: cannot read CSV headers")
         return
     init_log()
+    load_state()
 
     last_open_ts = {}
     market_count = {}
@@ -412,7 +423,7 @@ def main():
                     # at the 15-min market open boundary). This replaces the old
                     # proxy that assumed Predict's target equals Poly's target.
                     market_open_epoch = derive_market_open_epoch(pr.get('epoch'))
-                    predict_target_real = lookup_pyth_target(market_open_epoch)
+                    predict_target_real = lookup_binance_target(market_open_epoch)
                     target_gap = ""
                     if predict_target_real is not None and p['tgt']:
                         target_gap = round(abs(p['tgt'] - predict_target_real), 2)
@@ -443,6 +454,7 @@ def main():
                     settle_trade_if_ready(tid)
 
             render_status(p, pr)
+            save_state()
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}")
         time.sleep(POLL_SEC)

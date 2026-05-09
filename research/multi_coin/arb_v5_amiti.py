@@ -56,7 +56,6 @@ P = "/root/data_btc_15m_research/combined_per_second.csv"
 K = "/root/data_kalshi_btc_15m/combined_per_second.csv"
 G = "/root/data_gemini_btc_15m/combined_per_second.csv"
 PR = "/root/data_predict_btc_15m/combined_per_second.csv"
-PYTH = "/root/data_pyth_btc/per_second.csv"
 PM_OUTCOMES = "/root/data_btc_15m_research/market_outcomes.csv"
 LOG = "/root/arb_v5_amiti_trades.csv"
 
@@ -70,11 +69,41 @@ AGGRESSIVE_GAP_THRESHOLD = 50
 MAX_TRADES_PER_MARKET = 15
 COOLDOWN_SEC = 5
 POLL_SEC = 2
-MAX_FEED_AGE_SEC = 30
+MAX_FEED_AGE_SEC = 10
 
 OPEN_TRADES = {}
 CLOSED_TRADES = []
 NEXT_TRADE_ID = 1
+
+STATE_FILE = "/root/arb_v5_amiti_state.json"
+
+
+def save_state():
+    try:
+        st = {"OPEN_TRADES": OPEN_TRADES, "NEXT_TRADE_ID": NEXT_TRADE_ID}
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            import json
+            json.dump(st, f, default=str)
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        pass
+
+
+def load_state():
+    global NEXT_TRADE_ID
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        import json
+        with open(STATE_FILE) as f:
+            st = json.load(f)
+        for tid_s, t in st.get("OPEN_TRADES", {}).items():
+            OPEN_TRADES[int(tid_s)] = t
+        NEXT_TRADE_ID = st.get("NEXT_TRADE_ID", NEXT_TRADE_ID)
+        print(f"loaded state: {len(OPEN_TRADES)} open, next_id={NEXT_TRADE_ID}")
+    except Exception as e:
+        print(f"load_state failed: {e}")
 ANSI_RESET = "\033[0m"; ANSI_GREEN = "\033[32m"; ANSI_RED = "\033[31m"
 ANSI_BOLD = "\033[1m"; ANSI_CYAN = "\033[36m"; ANSI_YELLOW = "\033[33m"
 
@@ -163,41 +192,28 @@ def parse_predict(row):
         return None
 
 
-def lookup_pyth_strike(market_open_epoch):
-    """Returns Pyth's BTC/USD price corresponding to Predict.fun's strike.
-    Predict.fun sets its strike when the BNB Chain block confirms the
-    market open — typically 2-5 seconds AFTER the nominal 15-min boundary.
-    So we search for Pyth samples in [open_epoch + 1, open_epoch + 8] and
-    take the AVERAGE of all samples in that window. This best approximates
-    the actual block-confirmation moment when Predict captured Pyth's price."""
+def lookup_binance_strike(market_open_epoch):
+    # Predict.fun strike = Binance BTC price at sec_from_start=1 of market open.
+    # Verified 5/5 markets on 08/05 with sub-dollar accuracy.
     if not market_open_epoch:
         return None
     try:
-        out = subprocess.run(["tail", "-n", "2000", PYTH], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["tail", "-n", "2000", P], capture_output=True, text=True, timeout=5)
         if not out.stdout: return None
-        header = read_header(PYTH)
+        header = read_header(P)
         if not header: return None
-        prices_in_window = []
-        fallback_price = None; fallback_diff = 999
         for line in out.stdout.strip().split("\n"):
             values = line.split(",")
             if len(values) < len(header): continue
             row = dict(zip(header, values))
             try:
-                e = int(row.get("epoch_sec") or 0)
-                price = float(row.get("btc_price") or 0)
+                me = int(row.get("market_epoch") or 0)
+                sec = int(row.get("sec_from_start") or 0)
+                price = float(row.get("binance_price") or 0)
             except Exception:
                 continue
-            if price <= 0: continue
-            offset = e - market_open_epoch
-            if 1 <= offset <= 8:
-                prices_in_window.append(price)
-            if abs(offset) < fallback_diff:
-                fallback_diff = abs(offset); fallback_price = price
-        if prices_in_window:
-            return sum(prices_in_window) / len(prices_in_window)
-        if fallback_diff <= 10:
-            return fallback_price
+            if me == market_open_epoch and sec == 1 and price > 0:
+                return price
         return None
     except Exception:
         return None
@@ -221,33 +237,25 @@ def lookup_poly_winner(slug):
 
 
 def lookup_predict_winner(market_id):
-    """At settlement, the orderbook collapses: winning side = price 1.00,
-    losing side = price 0.00. Often the winning side has only bids (no one
-    sells), and the losing side has only asks. Need to handle both cases."""
+    # Strike-comparison method: Predict's strike = Binance @ sec=1. The next
+    # 15-min market's strike is the settlement price of this one.
     if not market_id: return None
     try:
-        out = subprocess.run(["tail", "-n", "5000", PR], capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["grep", "-m", "1", f",{market_id},", PR],
+                              capture_output=True, text=True, timeout=10)
         if not out.stdout: return None
-        header = read_header(PR)
-        if not header: return None
-        for line in reversed(out.stdout.strip().split("\n")):
-            values = line.split(",")
-            if len(values) < len(header): continue
-            row = dict(zip(header, values))
-            if str(row.get("market_id", "")) != str(market_id): continue
-            try:
-                ya = float(row.get("yes_ask") or 0)
-                yb = float(row.get("yes_bid") or 0)
-            except Exception:
-                continue
-            # YES won: yes_bid near 1.00 (people buying YES at near $1 since it pays $1)
-            # ya may be empty (no sellers) — accept if yb is decisive
-            if yb >= 0.97:
-                return "YES"
-            # NO won: yes_ask near 0 (people selling YES for nothing since it pays $0)
-            # yb may be empty (no buyers) — accept if ya is decisive
-            if ya > 0 and ya <= 0.03:
-                return "NO"
+        first_row = out.stdout.strip().split("\n")[0].split(",")
+        if len(first_row) < 3: return None
+        try:
+            first_epoch = int(first_row[1])
+        except Exception:
+            return None
+        market_open = (first_epoch // 900) * 900
+        s_old = lookup_binance_strike(market_open)
+        s_new = lookup_binance_strike(market_open + 900)
+        if s_old is None or s_new is None: return None
+        if s_new > s_old: return "YES"
+        if s_new < s_old: return "NO"
         return None
     except Exception:
         return None
@@ -360,7 +368,8 @@ def render_status(p, k, g, pr, outlier_info):
     if g: out.append(f"  GEMINI  strike={g['strike']:.0f}  (info only)")
     pr_strike_str = ""
     try:
-        pr_strike_str = f" strike(Pyth)={lookup_pyth_strike((pr['epoch']//900)*900):.0f}" if pr else ""
+        _bs = lookup_binance_strike((pr['epoch']//900)*900) if pr else None
+        pr_strike_str = f" strike(Binance)={_bs:.0f}" if _bs else " strike(Binance)=n/a"
     except Exception:
         pr_strike_str = ""
     if pr: out.append(f"  PREDICT YES={pr['yes_ask']:.3f}  bid={pr['yes_bid']:.3f}  NO_impl={pr['no_ask_implied']:.3f}{pr_strike_str}  market={pr['market_id']}")
@@ -391,6 +400,7 @@ def main():
     if not all([p_h, k_h, g_h, pr_h]):
         print("ERROR: cannot read all 4 headers"); return
     init_log()
+    load_state()
 
     last_open_ts = {}
     market_count = {}
@@ -406,15 +416,17 @@ def main():
             ages = {
                 "poly": now_e - p.get("epoch", 0) if p else 999,
                 "predict": now_e - pr.get("epoch", 0) if pr else 999,
+                "kalshi": now_e - k.get("epoch", 0) if k else 999,
+                "gemini": now_e - g.get("epoch", 0) if g else 999,
             }
-            tradeable = ages["poly"] <= MAX_FEED_AGE_SEC and ages["predict"] <= MAX_FEED_AGE_SEC
+            tradeable = all(a <= MAX_FEED_AGE_SEC for a in ages.values())
 
             # Identify outlier across the 4 strikes (Predict now uses REAL Pyth strike)
             predict_strike = None
             if pr:
                 # Find market open epoch (round down to 15-min boundary)
                 market_open = derive_market_open_epoch(pr["market_id"], pr["epoch"])
-                predict_strike = lookup_pyth_strike(market_open)
+                predict_strike = lookup_binance_strike(market_open)
             strikes = {
                 "POLY": p["tgt"] if p else 0,
                 "KALSHI": k["strike"] if k else 0,
@@ -442,19 +454,19 @@ def main():
                 poly_strike = p["tgt"] if p else 0
                 poly_predict_gap = abs(poly_strike - predict_strike) if predict_strike else 0
 
-                # ===== AMITI FILTERS — applied here =====
-                # FILTER 1: spread of all 4 strikes must be in [20, 40]
+                # ===== AMITI FILTERS — gate trade opening only, not rendering =====
                 strike_values = [s for s in [strikes.get("POLY",0), strikes.get("KALSHI",0),
                                               strikes.get("GEMINI",0), strikes.get("PREDICT",0)] if s>0]
+                amiti_pass = True
                 if len(strike_values) < 4:
-                    continue
-                spread_4 = max(strike_values) - min(strike_values)
-                if not (20 <= spread_4 <= 40):
-                    continue
-                # FILTER 2: Gemini must NOT be the highest of the 4
-                gem = strikes.get("GEMINI", 0)
-                if gem > 0 and gem == max(strike_values):
-                    continue
+                    amiti_pass = False
+                else:
+                    spread_4 = max(strike_values) - min(strike_values)
+                    if not (20 <= spread_4 <= 40):
+                        amiti_pass = False
+                    gem = strikes.get("GEMINI", 0)
+                    if gem > 0 and gem == max(strike_values):
+                        amiti_pass = False
                 # ===== end AMITI filters =====
 
                 if predict_strike and poly_strike < predict_strike:
@@ -464,7 +476,7 @@ def main():
                 else:
                     positive_direction = "?"
 
-                for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
+                for direction, cost, p_ask, pr_ask, p_depth, pr_depth in (cands if amiti_pass else []):
                     if cost > COST_THRESHOLD_NORMAL: continue
                     if p_ask > SINGLE_LEG_MAX_ASK or pr_ask > SINGLE_LEG_MAX_ASK: continue
                     direction_safety = "safe" if direction == positive_direction else \
@@ -515,6 +527,7 @@ def main():
                     settle_trade_if_ready(tid)
 
             render_status(p, k, g, pr, outlier_info)
+            save_state()
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}")
         time.sleep(POLL_SEC)

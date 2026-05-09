@@ -8,8 +8,7 @@ The user runs the Polymarket bot on a Hetzner VPS in Germany (chosen for low lat
 
 **Connection:**
 - IP: `178.104.134.228`
-- SSH: `ssh root@178.104.134.228`
-- Auth: password (no SSH key set up yet)
+- SSH: **always use `ssh hetzner`** (alias defined in `C:\Users\user\.ssh\config` with key `~/.ssh/id_ed25519_hetzner`). Connecting via `ssh root@178.104.134.228` bypasses the alias and falls back to password, which fails.
 - User: root (everything runs as root in `/root/`)
 
 **System:**
