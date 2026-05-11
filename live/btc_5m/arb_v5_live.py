@@ -154,11 +154,48 @@ def get_current_predict_market_id():
 
 # ---- main ----
 
+def snapshot_wealth(pt, poly_client):
+    """Return total wealth: USDT on BNB + Predict open positions value + Polymarket USDC."""
+    from web3 import Web3
+    from predict_sdk import ChainId, ADDRESSES_BY_CHAIN_ID, RPC_URLS_BY_CHAIN_ID, ERC20_ABI
+    addrs = ADDRESSES_BY_CHAIN_ID[ChainId.BNB_MAINNET]
+    w3 = Web3(Web3.HTTPProvider(RPC_URLS_BY_CHAIN_ID[ChainId.BNB_MAINNET]))
+    usdt = w3.eth.contract(address=Web3.to_checksum_address(addrs.USDT), abi=ERC20_ABI)
+    eoa = Web3.to_checksum_address(pt.address)
+    usdt_balance = usdt.functions.balanceOf(eoa).call() / 1e18
+
+    # Predict positions: include both OPEN value and WON/LOST settled value (since they map to USDT eventually)
+    positions = pt.get_positions()
+    predict_pos_value = sum(float(p.get("valueUsd") or 0) for p in positions)
+
+    # Polymarket USDC
+    poly_usdc = 0
+    try:
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+        resp = poly_client.get_balance_allowance(params)
+        poly_usdc = int(resp["balance"]) / 1e6
+    except Exception:
+        pass
+
+    return {
+        "usdt": usdt_balance,
+        "predict_positions": predict_pos_value,
+        "poly_usdc": poly_usdc,
+        "total": usdt_balance + predict_pos_value + poly_usdc,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--max-windows", type=int, default=1, help="run at most N 15min windows")
+    ap.add_argument("--max-windows", type=int, default=9999,
+                    help="hard cap on windows (default unlimited)")
     ap.add_argument("--max-trades-per-window", type=int, default=5)
     ap.add_argument("--invest", type=float, default=INVEST_PER_SIDE)
+    ap.add_argument("--stop-on-loss", action="store_true", default=True,
+                    help="exit if a window closes with negative PnL")
+    ap.add_argument("--settle-wait-sec", type=int, default=60,
+                    help="seconds to wait after window close for settlements")
     args = ap.parse_args()
 
     print(f"=== arb_v5_live starting at {now_iso()} ===")
@@ -192,6 +229,8 @@ def main():
     current_poly_market = None
     current_predict_market = None
     current_predict_meta = None
+    window_open_wealth = None  # wealth snapshot at start of current window
+    cumulative_pnl = 0.0       # cumulative across all completed windows
 
     while windows_done < args.max_windows:
         try:
@@ -203,18 +242,37 @@ def main():
 
             # Detect window boundary
             if window_epoch != current_epoch:
-                if current_epoch is not None:
+                # Evaluate prior window's PnL (if any) before moving on
+                if current_epoch is not None and window_open_wealth is not None:
+                    print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s for settlements...")
+                    time.sleep(args.settle_wait_sec)
+                    close_snap = snapshot_wealth(pt, poly_client)
+                    window_pnl = close_snap["total"] - window_open_wealth["total"]
+                    cumulative_pnl += window_pnl
+                    log_order("WINDOW_CLOSE",
+                              window=current_epoch,
+                              trades=trades_this_window,
+                              wealth_before=round(window_open_wealth["total"], 4),
+                              wealth_after=round(close_snap["total"], 4),
+                              window_pnl=round(window_pnl, 4),
+                              cum_pnl=round(cumulative_pnl, 4))
                     windows_done += 1
-                    print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. windows_done={windows_done}/{args.max_windows}")
+                    if args.stop_on_loss and window_pnl < 0:
+                        print(f"\n!!! STOP: window PnL ${window_pnl:+.4f} < 0. Exiting after {windows_done} windows. cumulative ${cumulative_pnl:+.4f}")
+                        break
                     if windows_done >= args.max_windows:
                         break
+
                 current_epoch = window_epoch
                 trades_this_window = 0
                 current_poly_market = fetch_poly_market(window_epoch)
                 current_predict_market = get_current_predict_market_id()
                 if current_predict_market:
                     current_predict_meta = pt.get_market(current_predict_market)
-                print(f"\n>>> NEW WINDOW {window_epoch} predict_mid={current_predict_market} poly_slug={current_poly_market['slug'] if current_poly_market else 'n/a'}")
+                window_open_wealth = snapshot_wealth(pt, poly_client)
+                print(f"\n>>> NEW WINDOW {window_epoch} predict_mid={current_predict_market} "
+                      f"poly_slug={current_poly_market['slug'] if current_poly_market else 'n/a'}  "
+                      f"wealth=${window_open_wealth['total']:.2f}")
 
             p_age = now_e - p.get("epoch", 0) if p else 999
             pr_age = now_e - pr.get("epoch", 0) if pr else 999
