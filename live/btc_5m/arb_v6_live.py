@@ -37,16 +37,17 @@ load_dotenv(ENV_PATH, override=True)
 
 P_DATA = "/root/data_btc_1h_research/combined_per_second.csv"
 PR_DATA = "/root/data_predict_btc_1h/combined_per_second.csv"
+PR_LATEST_JSON = "/root/data_predict_btc_1h/latest.json"
 PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
 LIVE_TRADES = "/root/arb_v6_live_trades.csv"
 LIVE_ORDERS = "/root/arb_v6_live_orders.csv"
 
 INVEST_PER_SIDE = 2.0
-COST_THRESHOLD = 0.90
+COST_THRESHOLD = 0.88   # tighter threshold = insurance reserve for unhedged tail risk
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_WINDOW = 5
 COOLDOWN_SEC = 5
-POLL_SEC = 2
+POLL_SEC = 0.1
 MAX_FEED_AGE_SEC = 10
 
 POLY_SAFE = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
@@ -110,6 +111,25 @@ def parse_poly(row, hdr):
         "da": fnum(d.get("down_ask", 0)),
         "ua_usd": fnum(d.get("up_usd_best", 0)),
         "da_usd": fnum(d.get("down_usd_best", 0)),
+    }
+
+
+def parse_predict_latest_json(path):
+    """Read latest.json written by Predict recorder on every WS event (~100ms cadence)."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    return {
+        "epoch": int(d.get("ts_ms", 0) // 1000),
+        "ts_ms": d.get("ts_ms", 0),
+        "market_id": d.get("market_id", ""),
+        "yes_ask": float(d.get("yes_ask", 0)),
+        "yes_bid": float(d.get("yes_bid", 0)),
+        "no_ask_implied": float(d.get("no_ask_implied", 0)),
+        "yes_ask_usd": float(d.get("yes_ask_usd", 0)),
+        "no_ask_usd": float(d.get("no_ask_usd_buyable", 0)),
     }
 
 
@@ -242,7 +262,10 @@ def main():
     while windows_done < args.max_windows:
         try:
             p = parse_poly(tail_last_row(P_DATA), p_hdr)
-            pr = parse_predict(tail_last_row(PR_DATA), pr_hdr)
+            # Use latest.json (updated by Predict recorder on every WS event, ~100ms cadence)
+            pr = parse_predict_latest_json(PR_LATEST_JSON)
+            if pr is None:
+                pr = parse_predict(tail_last_row(PR_DATA), pr_hdr)
 
             now_e = int(time.time())
             window_epoch = (now_e // 3600) * 3600
@@ -329,63 +352,106 @@ def main():
             predict_outcome = next(o for o in current_predict_meta["outcomes"]
                                    if o["name"] == predict_outcome_name)
 
+            t_detect = time.time()
             log_order("OPPORTUNITY", direction=direction, cost=cost,
                       p_ask=p_ask, pr_ask=pr_ask, shares=shares)
 
-            # ---- Place POLY leg ----
-            poly_resp = None
-            try:
-                args_poly = OrderArgsV2(
-                    price=round(p_ask, 4),
-                    size=round(shares, 4),
-                    side="BUY",
-                    token_id=str(poly_token),
-                )
-                poly_resp = poly_client.create_and_post_order(args_poly, order_type=OrderType.GTC)
-                log_order("POLY_ORDER", price=p_ask, shares=shares,
-                          response=json.dumps(poly_resp, default=str)[:200],
-                          orderID=(poly_resp or {}).get("orderID"),
-                          status=(poly_resp or {}).get("status"))
-            except Exception as e:
-                log_order("POLY_ERROR", err=str(e))
-                time.sleep(POLL_SEC)
-                continue
+            # ---- Sequential submission, SMALLER-ASK side FIRST ----
+            def do_poly():
+                t0 = time.time()
+                try:
+                    args_poly = OrderArgsV2(
+                        price=round(p_ask, 4),
+                        size=round(shares, 4),
+                        side="BUY",
+                        token_id=str(poly_token),
+                    )
+                    resp = poly_client.create_and_post_order(args_poly, order_type=OrderType.GTC)
+                    return resp, None, (time.time() - t0) * 1000
+                except Exception as e:
+                    return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
-            if not (poly_resp and poly_resp.get("success")):
-                log_order("POLY_FAILED", response=str(poly_resp)[:200])
-                time.sleep(POLL_SEC)
-                continue
+            def do_pred():
+                t0 = time.time()
+                try:
+                    resp = pt.place_limit(
+                        market_id=current_predict_market,
+                        outcome_token_id=predict_outcome["onChainId"],
+                        side="BUY",
+                        price=pr_ask,
+                        shares=shares,
+                        is_neg_risk=current_predict_meta["isNegRisk"],
+                        is_yield_bearing=current_predict_meta["isYieldBearing"],
+                        fee_rate_bps=current_predict_meta["feeRateBps"],
+                    )
+                    return resp, None, (time.time() - t0) * 1000
+                except Exception as e:
+                    return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
-            # ---- Place PREDICT leg ----
-            pred_resp = pt.place_limit(
-                market_id=current_predict_market,
-                outcome_token_id=predict_outcome["onChainId"],
-                side="BUY",
-                price=pr_ask,
-                shares=shares,
-                is_neg_risk=current_predict_meta["isNegRisk"],
-                is_yield_bearing=current_predict_meta["isYieldBearing"],
-                fee_rate_bps=current_predict_meta["feeRateBps"],
-            )
-            log_order("PREDICT_ORDER", orderId=pred_resp.get("orderId"),
-                      orderHash=(pred_resp.get("orderHash") or "")[:14],
+            poly_first = p_ask <= pr_ask
+            if poly_first:
+                poly_resp, poly_err, poly_ms = do_poly()
+                pred_resp, pred_err, pred_ms = do_pred()
+            else:
+                pred_resp, pred_err, pred_ms = do_pred()
+                poly_resp, poly_err, poly_ms = do_poly()
+
+            pred_resp = pred_resp or {}
+            total_ms = (time.time() - t_detect) * 1000
+            log_order("SUBMIT_LATENCY",
+                      first_side=("poly" if poly_first else "predict"),
+                      poly_ms=round(poly_ms, 1),
+                      pred_ms=round(pred_ms, 1),
+                      total_ms=round(total_ms, 1))
+
+            poly_filled = (poly_resp and poly_resp.get("status") == "matched")
+            poly_live = (poly_resp and poly_resp.get("status") == "live")
+            poly_orderID = (poly_resp or {}).get("orderID", "")
+            pred_orderId = pred_resp.get("orderId")
+
+            log_order("POLY_ORDER", err=poly_err,
+                      orderID=poly_orderID,
+                      status=(poly_resp or {}).get("status"),
+                      filled=poly_filled)
+            log_order("PREDICT_ORDER", err=pred_err,
+                      orderId=pred_orderId,
                       code=pred_resp.get("code"))
 
-            if not pred_resp.get("orderId"):
-                # POLY filled but PREDICT failed ג€” UNHEDGED EXPOSURE. Try to sell poly back.
-                log_order("UNHEDGED_WARN", note="poly filled, predict failed; attempting poly close")
-                # Best effort ג€” submit a sell at the bid
+            poly_ok = poly_filled  # only consider poly "ok" if actually FILLED, not just "live"
+            pred_ok = bool(pred_orderId)
+
+            # ---- Unwind logic: cancel/sell-market the leg that filled when the other failed ----
+            if poly_ok and not pred_ok:
+                log_order("UNHEDGED_WARN_POLY_FILLED",
+                          note="poly filled but predict failed ג€” selling poly at market")
                 try:
+                    # Use FAK at a price aggressive enough to cross the spread
                     sell_args = OrderArgsV2(
-                        price=round(p_ask - 0.02, 4),  # sell at slightly under
+                        price=round(max(p_ask - 0.10, 0.01), 4),
                         size=round(shares, 4),
                         side="SELL",
                         token_id=str(poly_token),
                     )
-                    sell_resp = poly_client.create_and_post_order(sell_args, order_type=OrderType.GTC)
-                    log_order("POLY_UNWIND", response=json.dumps(sell_resp, default=str)[:200])
+                    sell_resp = poly_client.create_and_post_order(sell_args, order_type=OrderType.FAK)
+                    log_order("POLY_UNWIND_SELL",
+                              response=json.dumps(sell_resp, default=str)[:200],
+                              status=(sell_resp or {}).get("status"))
                 except Exception as e:
-                    log_order("POLY_UNWIND_ERROR", err=str(e))
+                    log_order("POLY_UNWIND_ERROR", err=f"{type(e).__name__}: {e}")
+            elif poly_live and not pred_ok:
+                # Poly resting, predict failed ג€” cancel the resting poly order
+                log_order("CANCEL_POLY_RESTING",
+                          note="poly live (resting), predict failed ג€” canceling poly order")
+                try:
+                    cancel_resp = poly_client.cancel_orders([str(poly_orderID)])
+                    log_order("POLY_CANCEL", response=json.dumps(cancel_resp, default=str)[:200])
+                except Exception as e:
+                    log_order("POLY_CANCEL_ERROR", err=f"{type(e).__name__}: {e}")
+            elif not poly_ok and pred_ok:
+                # Predict filled but Poly failed ג€” predict cancel needs on-chain tx, log warning
+                log_order("UNHEDGED_WARN_PRED_FILLED",
+                          note="predict filled but poly failed ג€” predict on-chain cancel not yet implemented",
+                          predict_orderId=pred_orderId)
 
             last_open_ts[key] = time.time()
             trades_this_window += 1
@@ -425,4 +491,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
