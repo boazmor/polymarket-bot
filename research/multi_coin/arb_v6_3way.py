@@ -437,6 +437,11 @@ def main():
                     raw_cands.append(('B_POLY', p['da']+pr['yes_ask'], p['da'], pr['yes_ask'], p['da_usd']+lim_dn_usd, pr['yes_ask_usd']))
                 if lim_dn > 0 and pr['yes_ask'] > 0:
                     raw_cands.append(('B_LIM', lim_dn+pr['yes_ask'], lim_dn, pr['yes_ask'], lim_dn_usd+p['da_usd'], pr['yes_ask_usd']))
+                # Same-oracle arb: Poly + Limitless (both Chainlink)
+                if p['ua'] > 0 and lim_dn > 0:
+                    raw_cands.append(('PolyUP_LimDN', p['ua']+lim_dn, p['ua'], lim_dn, p['ua_usd'], lim_dn_usd))
+                if lim_up > 0 and p['da'] > 0:
+                    raw_cands.append(('LimUP_PolyDN', lim_up+p['da'], lim_up, p['da'], lim_up_usd, p['da_usd']))
                 raw_cands.sort(key=lambda c: c[1])
                 cands = raw_cands
                 for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
