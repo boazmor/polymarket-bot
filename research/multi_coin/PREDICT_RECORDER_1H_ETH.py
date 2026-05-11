@@ -248,6 +248,37 @@ async def ws_listener(csvs: CsvStore):
                         if data.get("marketId") == CURRENT_MARKET_ID:
                             LATEST_OB = data
                             LATEST_OB_TS = time.time()
+                            # LATEST_JSON_WRITTEN_FLAG — pro mode: write latest.json snapshot on every WS update
+                            try:
+                                bids_lj = data.get("bids", []) or []
+                                asks_lj = data.get("asks", []) or []
+                                if bids_lj and asks_lj:
+                                    yb_lj = float(bids_lj[0][0]); ya_lj = float(asks_lj[0][0])
+                                    yas_lj = float(asks_lj[0][1]); ybs_lj = float(bids_lj[0][1])
+                                    yes_ask_usd_lj = sum(float(a[0])*float(a[1]) for a in asks_lj)
+                                    yes_bid_usd_lj = sum(float(b[0])*float(b[1]) for b in bids_lj)
+                                    snap = {
+                                        "ts_ms": int(LATEST_OB_TS*1000),
+                                        "market_id": CURRENT_MARKET_ID,
+                                        "slug": CURRENT_SLUG,
+                                        "market_open_epoch": CURRENT_MARKET_OPEN_EPOCH,
+                                        "strike": CURRENT_STRIKE,
+                                        "yes_bid": yb_lj, "yes_ask": ya_lj,
+                                        "yes_bid_size": ybs_lj, "yes_ask_size": yas_lj,
+                                        "yes_ask_usd": round(yes_ask_usd_lj,2),
+                                        "yes_bid_usd": round(yes_bid_usd_lj,2),
+                                        "no_ask_implied": round(1.0-yb_lj, 4),
+                                        "no_ask_usd_buyable": round(yes_bid_usd_lj, 2),
+                                        "spread": round(ya_lj-yb_lj, 4),
+                                    }
+                                    import json as _json, os as _os
+                                    _tmp = _os.path.join(DATA_DIR, "latest.json.tmp")
+                                    _final = _os.path.join(DATA_DIR, "latest.json")
+                                    with open(_tmp, "w") as _f:
+                                        _json.dump(snap, _f)
+                                    _os.replace(_tmp, _final)
+                            except Exception:
+                                pass
         except Exception as e:
             csvs.event("WS_DISCONNECT", f"{type(e).__name__}: {e}")
             await asyncio.sleep(2)
