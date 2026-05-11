@@ -57,23 +57,60 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def find_current_market(keyword: str):
-    """Returns (id, slug, conditionId, title, baseline) for the current BTC {keyword} market."""
+PAGE_URL_FOR_WINDOW = {
+    "5m":  "https://limitless.exchange/markets/btc-5-min-price",
+    "15m": "https://limitless.exchange/markets/btc-15-min-price",
+    "1h":  "https://limitless.exchange/markets/btc-hourly-price",
+}
+
+SLUG_REGEX_FOR_WINDOW = {
+    "5m":  r"btc-up-or-down-5-min-\d+",
+    "15m": r"btc-up-or-down-15-min-\d+",
+    "1h":  r"btc-up-or-down-hourly-\d+",
+}
+
+import re
+
+def find_current_market(keyword: str, window: str = None):
+    """Try /markets/active first. If not found and window given, scrape page for slug."""
     code, data = http_get("/markets/active")
-    if code != 200 or not data:
-        return None
-    for m in data.get("data", []):
-        title = (m.get("title") or "")
-        if "BTC" in title.upper() and keyword in title:
-            return {
-                "id": m.get("id"),
-                "slug": m.get("slug"),
-                "conditionId": m.get("conditionId"),
-                "title": title,
-                "expirationTimestamp": m.get("expirationTimestamp"),
-                "startAt": m.get("startAt"),
-                "createdAt": m.get("createdAt"),
-            }
+    if code == 200 and data:
+        for m in data.get("data", []):
+            title = (m.get("title") or "")
+            if "BTC" in title.upper() and keyword in title:
+                return {
+                    "id": m.get("id"),
+                    "slug": m.get("slug"),
+                    "conditionId": m.get("conditionId"),
+                    "title": title,
+                    "expirationTimestamp": m.get("expirationTimestamp"),
+                    "startAt": m.get("startAt"),
+                    "createdAt": m.get("createdAt"),
+                }
+    # Fallback: scrape page for slug (markets in FUNDED status not in /active)
+    if window and window in PAGE_URL_FOR_WINDOW:
+        try:
+            url = PAGE_URL_FOR_WINDOW[window]
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                html = r.read().decode("utf-8", errors="replace")
+            slug_match = re.search(SLUG_REGEX_FOR_WINDOW[window], html)
+            if slug_match:
+                slug = slug_match.group(0)
+                # Fetch market metadata by slug
+                code, m = http_get(f"/markets/{slug}")
+                if code == 200 and m:
+                    return {
+                        "id": m.get("id"),
+                        "slug": slug,
+                        "conditionId": m.get("conditionId"),
+                        "title": m.get("title", ""),
+                        "expirationTimestamp": m.get("expirationTimestamp"),
+                        "startAt": m.get("startAt"),
+                        "createdAt": m.get("createdAt"),
+                    }
+        except Exception as e:
+            pass
     return None
 
 
@@ -180,7 +217,7 @@ def main():
 
     while not SHOULD_STOP:
         try:
-            m = find_current_market(keyword)
+            m = find_current_market(keyword, args.window)
             if not m:
                 log_event("MARKET_NOT_FOUND", f"keyword={keyword}")
                 time.sleep(5)
