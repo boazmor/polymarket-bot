@@ -338,7 +338,7 @@ def main():
                         side="BUY",
                         token_id=str(poly_token),
                     )
-                    poly_result["resp"] = poly_client.create_and_post_order(args_poly, order_type=OrderType.FOK)
+                    poly_result["resp"] = poly_client.create_and_post_order(args_poly, order_type=OrderType.GTC)
                 except Exception as e:
                     poly_result["err"] = f"{type(e).__name__}: {e}"
 
