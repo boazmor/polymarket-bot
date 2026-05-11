@@ -442,10 +442,25 @@ def main():
                 except Exception as e:
                     log_order("POLY_CANCEL_ERROR", err=f"{type(e).__name__}: {e}")
             elif not poly_ok and pred_ok:
-                # Predict filled but Poly failed — predict cancel needs on-chain tx, log warning
-                log_order("UNHEDGED_WARN_PRED_FILLED",
-                          note="predict filled but poly failed — predict on-chain cancel not yet implemented",
-                          predict_orderId=pred_orderId)
+                cap_price = round(0.99 - pr_ask, 4)
+                log_order("UNHEDGED_PRED_FILLED_RETRY", cap_price=cap_price, pr_ask=pr_ask, shares=shares)
+                retry_filled = False
+                if cap_price > 0.10:
+                    try:
+                        retry_args = OrderArgsV2(price=cap_price, size=round(shares, 4), side="BUY", token_id=str(poly_token))
+                        retry_resp = poly_client.create_and_post_order(retry_args, order_type=OrderType.GTC)
+                        retry_filled = retry_resp and retry_resp.get("status") == "matched"
+                        log_order("POLY_RETRY", status=(retry_resp or {}).get("status"), filled=retry_filled)
+                    except Exception as e:
+                        log_order("POLY_RETRY_ERROR", err=f"{type(e).__name__}: {e}")
+                if not retry_filled:
+                    log_order("PREDICT_UNWIND_SELL", note="retry failed, selling predict back")
+                    try:
+                        sell_price = max(round(pr_ask - 0.05, 4), 0.01)
+                        sell_resp = pt.place_limit(market_id=current_predict_market, outcome_token_id=predict_outcome["onChainId"], side="SELL", price=sell_price, shares=shares, is_neg_risk=current_predict_meta["isNegRisk"], is_yield_bearing=current_predict_meta["isYieldBearing"], fee_rate_bps=current_predict_meta["feeRateBps"])
+                        log_order("PREDICT_SELL_RESULT", code=sell_resp.get("code"), orderId=sell_resp.get("orderId"))
+                    except Exception as e:
+                        log_order("PREDICT_SELL_ERROR", err=f"{type(e).__name__}: {e}")
 
             last_open_ts[key] = time.time()
             trades_this_window += 1
