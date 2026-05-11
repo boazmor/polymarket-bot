@@ -270,7 +270,8 @@ def main():
                     print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s for settlements...")
                     time.sleep(args.settle_wait_sec)
                     close_snap = snapshot_wealth(pt, poly_client)
-                    window_pnl = close_snap["total"] - window_open_wealth["total"]
+                    wealth_delta = close_snap["total"] - window_open_wealth["total"]
+                    window_pnl = wealth_delta if trades_this_window > 0 else 0.0
                     cumulative_pnl += window_pnl
                     log_order("WINDOW_CLOSE",
                               window=current_epoch,

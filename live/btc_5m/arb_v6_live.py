@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""arb_v6_live.py ג€” V5 BASIC live trader.
+"""arb_v6_live.py — V5 BASIC live trader.
 
 Same opportunity-detection logic as arb_virtual_bot_v5.py, but actually
 places orders on both Polymarket and Predict.fun.
@@ -9,8 +9,8 @@ Caps:
 - INVEST_PER_SIDE = 2.0 USD (small test size)
 
 Output:
-- /root/arb_v6_live_trades.csv     ג€” one row per closed trade (settled)
-- /root/arb_v6_live_orders.csv     ג€” every order request + response
+- /root/arb_v6_live_trades.csv     — one row per closed trade (settled)
+- /root/arb_v6_live_orders.csv     — every order request + response
 
 Usage:
     python3 arb_v6_live.py --max-windows 1
@@ -58,7 +58,7 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 def log_order(stage, **kw):
-    """Append one row per order action to arb_v5_live_orders.csv."""
+    """Append one row per order action to arb_v6_live_orders.csv."""
     row = {"ts": now_iso(), "stage": stage, **kw}
     new = not os.path.exists(LIVE_ORDERS)
     with open(LIVE_ORDERS, "a", newline="") as f:
@@ -277,7 +277,9 @@ def main():
                     print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s for settlements...")
                     time.sleep(args.settle_wait_sec)
                     close_snap = snapshot_wealth(pt, poly_client)
-                    window_pnl = close_snap["total"] - window_open_wealth["total"]
+                    wealth_delta = close_snap["total"] - window_open_wealth["total"]
+                    # Only count PnL from own trades; skip stop-on-loss if no trades opened
+                    window_pnl = wealth_delta if trades_this_window > 0 else 0.0
                     cumulative_pnl += window_pnl
                     log_order("WINDOW_CLOSE",
                               window=current_epoch,
@@ -423,7 +425,7 @@ def main():
             # ---- Unwind logic: cancel/sell-market the leg that filled when the other failed ----
             if poly_ok and not pred_ok:
                 log_order("UNHEDGED_WARN_POLY_FILLED",
-                          note="poly filled but predict failed ג€” selling poly at market")
+                          note="poly filled but predict failed — selling poly at market")
                 try:
                     # Use FAK at a price aggressive enough to cross the spread
                     sell_args = OrderArgsV2(
@@ -439,18 +441,18 @@ def main():
                 except Exception as e:
                     log_order("POLY_UNWIND_ERROR", err=f"{type(e).__name__}: {e}")
             elif poly_live and not pred_ok:
-                # Poly resting, predict failed ג€” cancel the resting poly order
+                # Poly resting, predict failed — cancel the resting poly order
                 log_order("CANCEL_POLY_RESTING",
-                          note="poly live (resting), predict failed ג€” canceling poly order")
+                          note="poly live (resting), predict failed — canceling poly order")
                 try:
                     cancel_resp = poly_client.cancel_orders([str(poly_orderID)])
                     log_order("POLY_CANCEL", response=json.dumps(cancel_resp, default=str)[:200])
                 except Exception as e:
                     log_order("POLY_CANCEL_ERROR", err=f"{type(e).__name__}: {e}")
             elif not poly_ok and pred_ok:
-                # Predict filled but Poly failed ג€” predict cancel needs on-chain tx, log warning
+                # Predict filled but Poly failed — predict cancel needs on-chain tx, log warning
                 log_order("UNHEDGED_WARN_PRED_FILLED",
-                          note="predict filled but poly failed ג€” predict on-chain cancel not yet implemented",
+                          note="predict filled but poly failed — predict on-chain cancel not yet implemented",
                           predict_orderId=pred_orderId)
 
             last_open_ts[key] = time.time()
