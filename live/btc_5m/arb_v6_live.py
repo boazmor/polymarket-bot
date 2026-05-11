@@ -6,7 +6,7 @@ places orders on both Polymarket and Predict.fun.
 
 Caps:
 - MAX_TRADES_PER_WINDOW = 5
-- INVEST_PER_SIDE = 2.0 USD (small test size)
+- INVEST_PER_SIDE = 5.0 USD (small test size)
 
 Output:
 - /root/arb_v6_live_trades.csv     — one row per closed trade (settled)
@@ -42,7 +42,7 @@ PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
 LIVE_TRADES = "/root/arb_v6_live_trades.csv"
 LIVE_ORDERS = "/root/arb_v6_live_orders.csv"
 
-INVEST_PER_SIDE = 2.0
+INVEST_PER_SIDE = 5.0
 COST_THRESHOLD = 0.88   # tighter threshold = insurance reserve for unhedged tail risk
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_WINDOW = 5
@@ -257,6 +257,7 @@ def main():
     current_predict_market = None
     current_predict_meta = None
     window_open_wealth = None  # wealth snapshot at start of current window
+    window_has_unhedged = False
     cumulative_pnl = 0.0       # cumulative across all completed windows
 
     while windows_done < args.max_windows:
@@ -297,6 +298,7 @@ def main():
 
                 current_epoch = window_epoch
                 trades_this_window = 0
+                window_has_unhedged = False
                 current_poly_market = fetch_poly_market(window_epoch)
                 current_predict_market = get_current_predict_market_id()
                 if current_predict_market:
@@ -315,6 +317,9 @@ def main():
                 continue
 
             if trades_this_window >= args.max_trades_per_window:
+                time.sleep(POLL_SEC)
+                continue
+            if 'window_has_unhedged' in dir() and window_has_unhedged:
                 time.sleep(POLL_SEC)
                 continue
 
@@ -440,6 +445,8 @@ def main():
                               status=(sell_resp or {}).get("status"))
                 except Exception as e:
                     log_order("POLY_UNWIND_ERROR", err=f"{type(e).__name__}: {e}")
+                window_has_unhedged = True
+                log_order("WINDOW_BLOCKED", reason="poly_unwind", window=current_epoch)
             elif poly_live and not pred_ok:
                 # Poly resting, predict failed — cancel the resting poly order
                 log_order("CANCEL_POLY_RESTING",
@@ -449,6 +456,7 @@ def main():
                     log_order("POLY_CANCEL", response=json.dumps(cancel_resp, default=str)[:200])
                 except Exception as e:
                     log_order("POLY_CANCEL_ERROR", err=f"{type(e).__name__}: {e}")
+                # poly was just live, cancel succeeded — no exposure, no need to block
             elif not poly_ok and pred_ok:
                 cap_price = round(0.99 - pr_ask, 4)
                 log_order("UNHEDGED_PRED_FILLED_RETRY", cap_price=cap_price, pr_ask=pr_ask, shares=shares)
@@ -462,6 +470,14 @@ def main():
                     except Exception as e:
                         log_order("POLY_RETRY_ERROR", err=f"{type(e).__name__}: {e}")
                 if not retry_filled:
+                    # CRITICAL: cancel the retry order if it's still live, before selling predict
+                    retry_orderID = (retry_resp or {}).get("orderID") if 'retry_resp' in dir() else None
+                    if retry_orderID:
+                        try:
+                            cancel_resp = poly_client.cancel_orders([str(retry_orderID)])
+                            log_order("RETRY_CANCEL", response=json.dumps(cancel_resp, default=str)[:200])
+                        except Exception as e:
+                            log_order("RETRY_CANCEL_ERROR", err=f"{type(e).__name__}: {e}")
                     log_order("PREDICT_UNWIND_SELL", note="retry failed, selling predict back")
                     try:
                         sell_price = max(round(pr_ask - 0.05, 4), 0.01)
