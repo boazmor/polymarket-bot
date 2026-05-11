@@ -37,16 +37,17 @@ load_dotenv(ENV_PATH, override=True)
 
 P_DATA = "/root/data_btc_15m_research/combined_per_second.csv"
 PR_DATA = "/root/data_predict_btc_15m/combined_per_second.csv"
+PR_LATEST_JSON = "/root/data_predict_btc_15m/latest.json"
 PR_MARKETS = "/root/data_predict_btc_15m/markets.csv"
 LIVE_TRADES = "/root/arb_v5_live_trades.csv"
 LIVE_ORDERS = "/root/arb_v5_live_orders.csv"
 
 INVEST_PER_SIDE = 2.0
-COST_THRESHOLD = 0.90
+COST_THRESHOLD = 0.88   # tighter threshold = insurance reserve for unhedged tail risk
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_WINDOW = 5
 COOLDOWN_SEC = 5
-POLL_SEC = 1
+POLL_SEC = 0.1
 MAX_FEED_AGE_SEC = 10
 
 POLY_SAFE = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
@@ -110,6 +111,25 @@ def parse_poly(row, hdr):
         "da": fnum(d.get("down_ask", 0)),
         "ua_usd": fnum(d.get("up_usd_best", 0)),
         "da_usd": fnum(d.get("down_usd_best", 0)),
+    }
+
+
+def parse_predict_latest_json(path):
+    """Read latest.json written by Predict recorder on every WS event (~100ms cadence)."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    return {
+        "epoch": int(d.get("ts_ms", 0) // 1000),
+        "ts_ms": d.get("ts_ms", 0),
+        "market_id": d.get("market_id", ""),
+        "yes_ask": float(d.get("yes_ask", 0)),
+        "yes_bid": float(d.get("yes_bid", 0)),
+        "no_ask_implied": float(d.get("no_ask_implied", 0)),
+        "yes_ask_usd": float(d.get("yes_ask_usd", 0)),
+        "no_ask_usd": float(d.get("no_ask_usd_buyable", 0)),
     }
 
 
@@ -235,7 +255,10 @@ def main():
     while windows_done < args.max_windows:
         try:
             p = parse_poly(tail_last_row(P_DATA), p_hdr)
-            pr = parse_predict(tail_last_row(PR_DATA), pr_hdr)
+            # Use latest.json (updated by Predict recorder on every WS event, ~100ms cadence)
+            pr = parse_predict_latest_json(PR_LATEST_JSON)
+            if pr is None:
+                pr = parse_predict(tail_last_row(PR_DATA), pr_hdr)
 
             now_e = int(time.time())
             window_epoch = (now_e // 900) * 900
@@ -322,15 +345,13 @@ def main():
             predict_outcome = next(o for o in current_predict_meta["outcomes"]
                                    if o["name"] == predict_outcome_name)
 
+            t_detect = time.time()
             log_order("OPPORTUNITY", direction=direction, cost=cost,
                       p_ask=p_ask, pr_ask=pr_ask, shares=shares)
 
-            # ---- Parallel submission ----
-            import threading
-            poly_result = {"resp": None, "err": None}
-            pred_result = {"resp": None, "err": None}
-
-            def submit_poly():
+            # ---- Sequential submission, SMALLER-ASK side FIRST ----
+            def do_poly():
+                t0 = time.time()
                 try:
                     args_poly = OrderArgsV2(
                         price=round(p_ask, 4),
@@ -338,13 +359,15 @@ def main():
                         side="BUY",
                         token_id=str(poly_token),
                     )
-                    poly_result["resp"] = poly_client.create_and_post_order(args_poly, order_type=OrderType.GTC)
+                    resp = poly_client.create_and_post_order(args_poly, order_type=OrderType.GTC)
+                    return resp, None, (time.time() - t0) * 1000
                 except Exception as e:
-                    poly_result["err"] = f"{type(e).__name__}: {e}"
+                    return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
-            def submit_pred():
+            def do_pred():
+                t0 = time.time()
                 try:
-                    pred_result["resp"] = pt.place_limit(
+                    resp = pt.place_limit(
                         market_id=current_predict_market,
                         outcome_token_id=predict_outcome["onChainId"],
                         side="BUY",
@@ -354,29 +377,36 @@ def main():
                         is_yield_bearing=current_predict_meta["isYieldBearing"],
                         fee_rate_bps=current_predict_meta["feeRateBps"],
                     )
+                    return resp, None, (time.time() - t0) * 1000
                 except Exception as e:
-                    pred_result["err"] = f"{type(e).__name__}: {e}"
+                    return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
-            t_poly = threading.Thread(target=submit_poly)
-            t_pred = threading.Thread(target=submit_pred)
-            t_poly.start()
-            t_pred.start()
-            t_poly.join(timeout=10)
-            t_pred.join(timeout=10)
+            poly_first = p_ask <= pr_ask
+            if poly_first:
+                poly_resp, poly_err, poly_ms = do_poly()
+                pred_resp, pred_err, pred_ms = do_pred()
+            else:
+                pred_resp, pred_err, pred_ms = do_pred()
+                poly_resp, poly_err, poly_ms = do_poly()
 
-            poly_resp = poly_result["resp"]
-            pred_resp = pred_result["resp"] or {}
+            pred_resp = pred_resp or {}
+            total_ms = (time.time() - t_detect) * 1000
+            log_order("SUBMIT_LATENCY",
+                      first_side=("poly" if poly_first else "predict"),
+                      poly_ms=round(poly_ms, 1),
+                      pred_ms=round(pred_ms, 1),
+                      total_ms=round(total_ms, 1))
 
             poly_filled = (poly_resp and poly_resp.get("status") == "matched")
             poly_live = (poly_resp and poly_resp.get("status") == "live")
             poly_orderID = (poly_resp or {}).get("orderID", "")
             pred_orderId = pred_resp.get("orderId")
 
-            log_order("POLY_ORDER", err=poly_result["err"],
+            log_order("POLY_ORDER", err=poly_err,
                       orderID=poly_orderID,
                       status=(poly_resp or {}).get("status"),
                       filled=poly_filled)
-            log_order("PREDICT_ORDER", err=pred_result["err"],
+            log_order("PREDICT_ORDER", err=pred_err,
                       orderId=pred_orderId,
                       code=pred_resp.get("code"))
 
