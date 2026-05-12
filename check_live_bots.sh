@@ -60,17 +60,21 @@ check_bot() {
 }
 
 case "$HOST" in
-  helsinki)
+  usa)
     check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 600
+    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
     check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
     ;;
+  helsinki)
+    # Live bots migrated to US server 12/05. Helsinki keeps recorders only.
+    ;;
   hetzner)
-    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
+    # Live bots migrated to US server 12/05. Hetzner keeps virtual 3WAY bots and recorders.
     check_bot arb_v5_3way arb_v5_3way.py "" arb_v5_3way_run.log 900
     check_bot arb_v6_3way arb_v6_3way.py "" arb_v6_3way_run.log 1800
     ;;
   *)
-    echo "Usage: $0 helsinki|hetzner" >&2
+    echo "Usage: $0 usa|helsinki|hetzner" >&2
     exit 1
     ;;
 esac
