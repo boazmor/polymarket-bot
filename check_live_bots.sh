@@ -61,11 +61,11 @@ check_bot() {
 
 case "$HOST" in
   helsinki)
-    check_bot arb_3way_live arb_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_3way_live_v1.log 600
+    check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 600
     check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
     ;;
   hetzner)
-    check_bot arb_v6_live arb_v6_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_live_v14.log 1800
+    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
     check_bot arb_v5_3way arb_v5_3way.py "" arb_v5_3way_run.log 900
     check_bot arb_v6_3way arb_v6_3way.py "" arb_v6_3way_run.log 1800
     ;;

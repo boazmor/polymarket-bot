@@ -1,9 +1,14 @@
 ---
-name: arb_3way_live.py v1 deployed 12/05
-description: First live 3-platform arbitrage bot running on Helsinki. Replaces V5 LIVE on the 15-min market. Uses ThreadPoolExecutor for parallel-if-4x-depth, sequential thin-first otherwise, top-up from 3rd platform, emergency sell only if excess >10%.
+name: V5_3WAY LIVE + V6_3WAY LIVE deployed 12/05
+description: 3-platform live arbitrage bots. V5_3WAY on Helsinki for 15-min markets (replaces V5 LIVE), V6_3WAY on Hetzner for 1-hour markets (replaces V6 LIVE). Same engine — parallel-if-4x-depth, sequential thin-first else, top-up from 3rd platform, emergency sell only if excess >10%. All 6 candidate pairs supported after Limitless NO orderbook added.
 type: project
 originSessionId: 45cf2c48-b122-47c9-927a-f7ebcad47182
 ---
+
+Naming: V5_3WAY = 15-min, V6_3WAY = 1-hour, mirrors the virtual-bot names.
+
+Files: `/root/arb_v5_3way_live.py` on Helsinki, `/root/arb_v6_3way_live.py` on Hetzner. Both depend on predict_trader.py + limitless_trader.py + py_clob_client_v2 + limitless-sdk (Hetzner installed with --break-system-packages on 12/05). Output: arb_v5_3way_live_trades.csv / arb_v6_3way_live_trades.csv plus *_orders.csv per bot.
+
 Deployed 12/05 21:13 Israel under screen `arb_3way_live` on Helsinki.
 
 **What v1 supports:**

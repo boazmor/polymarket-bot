@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""arb_3way_live.py - 3-platform live arbitrage bot.
+"""arb_v5_3way_live.py - 3-platform live arbitrage bot for 15-MIN markets.
 
 Monitors Polymarket + Predict.fun + Limitless 15-min BTC up/down markets.
 Detects the cheapest of 4 hedged candidates per cycle (subset of v5_3way until
@@ -58,8 +58,8 @@ PR_MARKETS = "/root/data_predict_btc_15m/markets.csv"
 LIM_LATEST_JSON = "/root/data_limitless_btc_15m/latest.json"
 LIM_MARKETS = "/root/data_limitless_btc_15m/markets.csv"
 
-LIVE_TRADES = "/root/arb_3way_live_trades.csv"
-LIVE_ORDERS = "/root/arb_3way_live_orders.csv"
+LIVE_TRADES = "/root/arb_v5_3way_live_trades.csv"
+LIVE_ORDERS = "/root/arb_v5_3way_live_orders.csv"
 
 BASE_NOTIONAL_USD = 1.20
 MAX_SIDE_USD = 7.0
@@ -512,7 +512,7 @@ def main():
     ap.add_argument("--settle-wait-sec", type=int, default=SETTLE_WAIT_SEC)
     args = ap.parse_args()
 
-    print(f"=== arb_3way_live starting at {now_iso()} ===", flush=True)
+    print(f"=== arb_v5_3way_live (15min) starting at {now_iso()} ===", flush=True)
     print(f"invest_per_side=${args.invest}  max_trades_per_window={args.max_trades_per_window}", flush=True)
 
     api_key = os.environ["PREDICT_API_KEY"]
@@ -520,8 +520,8 @@ def main():
     lim_key = os.environ["LIMITLESS_API_KEY"]
     lim_sec = os.environ["LIMITLESS_API_SECRET"]
 
-    pt = PredictTrader(api_key, pk, log_path="/root/arb_3way_live_predict.log")
-    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_3way_live_lim.log")
+    pt = PredictTrader(api_key, pk, log_path="/root/arb_v5_3way_live_predict.log")
+    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_v5_3way_live_lim.log")
 
     from py_clob_client_v2.client import ClobClient
     from py_clob_client_v2.clob_types import OrderArgsV2, OrderType
