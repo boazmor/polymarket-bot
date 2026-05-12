@@ -67,12 +67,20 @@ COST_THRESHOLD = 0.90
 SINGLE_LEG_MAX_ASK = 0.80
 MIN_DEPTH_USD = 5.0
 PARALLEL_DEPTH_MULTIPLIER = 4.0
-EXCESS_SELL_PCT = 0.10
+EXCESS_SELL_PCT = 0.05
+LAST_SECONDS_BLOCK_CROSS_ORACLE = 60
 COOLDOWN_SEC = 5
 POLL_SEC = 0.2
 MAX_FEED_AGE_SEC = 10
 LIM_MAX_AGE_SEC = 20
 SETTLE_WAIT_SEC = 60
+WINDOW_SEC = 900
+
+ORACLE_BY_PLATFORM = {
+    "poly": "chainlink",
+    "lim": "chainlink",
+    "predict": "binance",
+}
 
 POLY_SAFE = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
 
@@ -168,7 +176,9 @@ def parse_limitless_latest():
     up_bid = float(d.get("best_bid", 0))
     up_ask_usd = float(d.get("best_ask_size_usd", 0))
     up_bid_usd = float(d.get("best_bid_size_usd", 0))
-    # NO outcome: CTF complement of YES. Prefer explicit fields if recorder wrote them.
+    # NO outcome: CTF complement of YES. NO_ask is the inverse of UP_bid (the price
+    # someone is willing to BUY UP at = the price someone implicitly OFFERS NO at).
+    # Prefer explicit no_best_ask from recorder if available.
     down_ask = float(d.get("no_best_ask", round(1.0 - up_bid, 4) if up_bid > 0 else 0))
     down_ask_usd = float(d.get("no_best_ask_size_usd", up_bid_usd))
     return {
@@ -215,26 +225,42 @@ def fetch_poly_market(epoch):
 
 
 def snapshot_wealth(pt, poly_client, lt):
-    from web3 import Web3
-    from predict_sdk import ChainId, ADDRESSES_BY_CHAIN_ID, RPC_URLS_BY_CHAIN_ID, ERC20_ABI
-    addrs = ADDRESSES_BY_CHAIN_ID[ChainId.BNB_MAINNET]
-    w3 = Web3(Web3.HTTPProvider(RPC_URLS_BY_CHAIN_ID[ChainId.BNB_MAINNET]))
-    usdt = w3.eth.contract(address=Web3.to_checksum_address(addrs.USDT), abi=ERC20_ABI)
-    eoa = Web3.to_checksum_address(pt.address)
-    usdt_balance = usdt.functions.balanceOf(eoa).call() / 1e18
+    """Return wealth snapshot with explicit validity flag.
 
-    positions = pt.get_positions()
-    predict_pos_value = sum(float(p.get("valueUsd") or 0) for p in positions)
+    A snapshot is `valid` only if ALL five sources returned successfully.
+    The caller MUST treat invalid snapshots as missing data (not as a loss):
+    do not compute PnL, do not trigger stop-on-loss, log and continue.
+    """
+    missing = []
+    usdt_balance = 0.0
+    try:
+        from web3 import Web3
+        from predict_sdk import ChainId, ADDRESSES_BY_CHAIN_ID, RPC_URLS_BY_CHAIN_ID, ERC20_ABI
+        addrs = ADDRESSES_BY_CHAIN_ID[ChainId.BNB_MAINNET]
+        w3 = Web3(Web3.HTTPProvider(RPC_URLS_BY_CHAIN_ID[ChainId.BNB_MAINNET]))
+        usdt = w3.eth.contract(address=Web3.to_checksum_address(addrs.USDT), abi=ERC20_ABI)
+        eoa = Web3.to_checksum_address(pt.address)
+        usdt_balance = usdt.functions.balanceOf(eoa).call() / 1e18
+    except Exception as e:
+        missing.append(f"bnb_usdt:{type(e).__name__}")
 
-    poly_usdc = 0
-    poly_positions_value = 0
+    predict_pos_value = 0.0
+    try:
+        positions = pt.get_positions()
+        predict_pos_value = sum(float(p.get("valueUsd") or 0) for p in positions)
+    except Exception as e:
+        missing.append(f"predict_positions:{type(e).__name__}")
+
+    poly_usdc = 0.0
     try:
         from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
         resp = poly_client.get_balance_allowance(params)
         poly_usdc = int(resp["balance"]) / 1e6
-    except Exception:
-        pass
+    except Exception as e:
+        missing.append(f"poly_usdc:{type(e).__name__}")
+
+    poly_positions_value = 0.0
     try:
         url = f"https://data-api.polymarket.com/positions?user={POLY_SAFE}&limit=100"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -246,10 +272,10 @@ def snapshot_wealth(pt, poly_client, lt):
                 poly_positions_value += float(cv)
             except (TypeError, ValueError):
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        missing.append(f"poly_positions:{type(e).__name__}")
 
-    lim_usdc = 0
+    lim_usdc = 0.0
     try:
         from web3 import Web3 as W3b
         rpc = os.environ.get("BASE_RPC_URL", "https://mainnet.base.org")
@@ -261,8 +287,8 @@ def snapshot_wealth(pt, poly_client, lt):
                 "stateMutability": "view", "type": "function"}]
         c = w3b.eth.contract(address=USDC, abi=abi)
         lim_usdc = c.functions.balanceOf(OWNER).call() / 1e6
-    except Exception:
-        pass
+    except Exception as e:
+        missing.append(f"lim_usdc:{type(e).__name__}")
 
     total = usdt_balance + predict_pos_value + poly_usdc + poly_positions_value + lim_usdc
     return {
@@ -272,14 +298,26 @@ def snapshot_wealth(pt, poly_client, lt):
         "poly_positions": poly_positions_value,
         "lim_usdc": lim_usdc,
         "total": total,
+        "valid": not missing,
+        "missing": missing,
     }
 
 
-def build_candidates(p, pr, lim, poly_market, predict_meta):
-    """Return list of viable candidate tuples (4 supported in v1).
+def _derive_cross_oracle(legs):
+    """cross_oracle is True iff the two legs settle under different oracles.
 
-    Each tuple: (direction, cost, legs)
-      legs = list of dicts: {platform, side, ask, depth_usd, token, outcome_name}
+    Derived automatically from each leg's oracle field so a typo cannot bypass
+    the late-window safety filter.
+    """
+    oracles = {l.get("oracle") for l in legs}
+    return len(oracles) > 1
+
+
+def build_candidates(p, pr, lim, poly_market, predict_meta):
+    """Return list of viable candidate tuples.
+
+    Each candidate: {direction, cost, legs, cross_oracle}
+      cross_oracle is derived from leg oracles, not hardcoded.
     """
     cands = []
     if p and pr and pr["no_ask_implied"] > 0 and p["ua"] > 0:
@@ -287,10 +325,10 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "A_POLY",
             "cost": p["ua"] + pr["no_ask_implied"],
             "legs": [
-                {"platform": "poly", "side": "BUY", "outcome": "Up",
+                {"platform": "poly", "oracle": "chainlink", "side": "BUY", "outcome": "Up",
                  "ask": p["ua"], "depth_usd": p["ua_usd"],
                  "token": poly_market["up_token"] if poly_market else None},
-                {"platform": "predict", "side": "BUY", "outcome": "Down",
+                {"platform": "predict", "oracle": "binance", "side": "BUY", "outcome": "Down",
                  "ask": pr["no_ask_implied"], "depth_usd": pr["no_ask_usd"]},
             ],
         })
@@ -299,10 +337,10 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "B_POLY",
             "cost": p["da"] + pr["yes_ask"],
             "legs": [
-                {"platform": "poly", "side": "BUY", "outcome": "Down",
+                {"platform": "poly", "oracle": "chainlink", "side": "BUY", "outcome": "Down",
                  "ask": p["da"], "depth_usd": p["da_usd"],
                  "token": poly_market["down_token"] if poly_market else None},
-                {"platform": "predict", "side": "BUY", "outcome": "Up",
+                {"platform": "predict", "oracle": "binance", "side": "BUY", "outcome": "Up",
                  "ask": pr["yes_ask"], "depth_usd": pr["yes_ask_usd"]},
             ],
         })
@@ -311,10 +349,10 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "A_LIM",
             "cost": lim["up_ask"] + pr["no_ask_implied"],
             "legs": [
-                {"platform": "lim", "side": "BUY", "outcome": "yes",
+                {"platform": "lim", "oracle": "chainlink", "side": "BUY", "outcome": "yes",
                  "ask": lim["up_ask"], "depth_usd": lim["up_ask_usd"],
                  "slug": lim["slug"]},
-                {"platform": "predict", "side": "BUY", "outcome": "Down",
+                {"platform": "predict", "oracle": "binance", "side": "BUY", "outcome": "Down",
                  "ask": pr["no_ask_implied"], "depth_usd": pr["no_ask_usd"]},
             ],
         })
@@ -323,10 +361,10 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "LimUP_PolyDN",
             "cost": lim["up_ask"] + p["da"],
             "legs": [
-                {"platform": "lim", "side": "BUY", "outcome": "yes",
+                {"platform": "lim", "oracle": "chainlink", "side": "BUY", "outcome": "yes",
                  "ask": lim["up_ask"], "depth_usd": lim["up_ask_usd"],
                  "slug": lim["slug"]},
-                {"platform": "poly", "side": "BUY", "outcome": "Down",
+                {"platform": "poly", "oracle": "chainlink", "side": "BUY", "outcome": "Down",
                  "ask": p["da"], "depth_usd": p["da_usd"],
                  "token": poly_market["down_token"] if poly_market else None},
             ],
@@ -336,10 +374,10 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "B_LIM",
             "cost": lim["down_ask"] + pr["yes_ask"],
             "legs": [
-                {"platform": "lim", "side": "BUY", "outcome": "no",
+                {"platform": "lim", "oracle": "chainlink", "side": "BUY", "outcome": "no",
                  "ask": lim["down_ask"], "depth_usd": lim["down_ask_usd"],
                  "slug": lim["slug"]},
-                {"platform": "predict", "side": "BUY", "outcome": "Up",
+                {"platform": "predict", "oracle": "binance", "side": "BUY", "outcome": "Up",
                  "ask": pr["yes_ask"], "depth_usd": pr["yes_ask_usd"]},
             ],
         })
@@ -348,18 +386,22 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
             "direction": "PolyUP_LimDN",
             "cost": p["ua"] + lim["down_ask"],
             "legs": [
-                {"platform": "poly", "side": "BUY", "outcome": "Up",
+                {"platform": "poly", "oracle": "chainlink", "side": "BUY", "outcome": "Up",
                  "ask": p["ua"], "depth_usd": p["ua_usd"],
                  "token": poly_market["up_token"] if poly_market else None},
-                {"platform": "lim", "side": "BUY", "outcome": "no",
+                {"platform": "lim", "oracle": "chainlink", "side": "BUY", "outcome": "no",
                  "ask": lim["down_ask"], "depth_usd": lim["down_ask_usd"],
                  "slug": lim["slug"]},
             ],
         })
+    # Auto-derive cross_oracle from leg oracles so a manual typo cannot
+    # incorrectly bypass the late-window safety filter.
+    for c in cands:
+        c["cross_oracle"] = _derive_cross_oracle(c["legs"])
     return cands
 
 
-def pick_best(cands):
+def pick_best(cands, sec_to_close=None):
     viable = []
     for c in cands:
         if c["cost"] > COST_THRESHOLD:
@@ -367,6 +409,11 @@ def pick_best(cands):
         if any(l["ask"] > SINGLE_LEG_MAX_ASK for l in c["legs"]):
             continue
         if any(l["depth_usd"] < MIN_DEPTH_USD for l in c["legs"]):
+            continue
+        # In the final seconds of a window, oracles can diverge right at the strike.
+        # Cross-oracle hedges are vulnerable to BOTH-LOSE in that scenario.
+        # Same-oracle pairs are always safe since both legs settle identically.
+        if c.get("cross_oracle") and sec_to_close is not None and sec_to_close < LAST_SECONDS_BLOCK_CROSS_ORACLE:
             continue
         viable.append(c)
     if not viable:
@@ -397,8 +444,12 @@ def can_fire_parallel(cand, shares):
     return True
 
 
-def place_poly(poly_client, OrderArgsV2, OrderType, leg, price, shares):
+def place_poly(poly_client, OrderArgsV2, OrderType, leg, price, shares, dry_run=False):
     t0 = time.time()
+    if dry_run:
+        log_order("DRY_RUN_POLY_BUY", price=price, shares=shares, token=str(leg.get("token"))[:12])
+        return {"platform": "poly", "ok": True, "size_filled": shares,
+                "dry_run": True, "ms": (time.time() - t0) * 1000}
     try:
         args = OrderArgsV2(price=round(price, 4), size=round(shares, 4), side="BUY",
                            token_id=str(leg["token"]))
@@ -412,8 +463,12 @@ def place_poly(poly_client, OrderArgsV2, OrderType, leg, price, shares):
                 "error": f"{type(e).__name__}: {e}", "ms": (time.time() - t0) * 1000}
 
 
-def place_predict(pt, predict_meta, current_predict_market, leg, price, shares):
+def place_predict(pt, predict_meta, current_predict_market, leg, price, shares, dry_run=False):
     t0 = time.time()
+    if dry_run:
+        log_order("DRY_RUN_PREDICT_BUY", price=price, shares=shares, outcome=leg.get("outcome"))
+        return {"platform": "predict", "ok": True, "size_filled": shares,
+                "dry_run": True, "ms": (time.time() - t0) * 1000}
     try:
         outcome_name = leg["outcome"]
         outcome = next(o for o in predict_meta["outcomes"] if o["name"] == outcome_name)
@@ -425,17 +480,49 @@ def place_predict(pt, predict_meta, current_predict_market, leg, price, shares):
             is_yield_bearing=predict_meta["isYieldBearing"],
             fee_rate_bps=predict_meta["feeRateBps"],
         )
-        ok = bool(resp.get("orderId")) and resp.get("code") == "OK"
-        return {"platform": "predict", "ok": ok,
-                "size_filled": shares if ok else 0,
-                "resp": resp, "ms": (time.time() - t0) * 1000}
+        order_id = resp.get("orderId")
+        code = resp.get("code")
+        accepted = bool(order_id) and code == "OK"
+        raw_block = resp.get("raw") if isinstance(resp.get("raw"), dict) else resp
+        filled_raw = (raw_block.get("filledSize")
+                      or raw_block.get("size_matched")
+                      or raw_block.get("matched_size")
+                      or raw_block.get("matchedSize")
+                      or resp.get("filledSize")
+                      or resp.get("size_matched"))
+        try:
+            filled = float(filled_raw) if filled_raw is not None else None
+        except (TypeError, ValueError):
+            filled = None
+        if filled is None:
+            # API accepted but didn't echo fill amount. We MUST proceed assuming
+            # full fill since otherwise we couldn't trade Predict at all; but we
+            # log the uncertainty so downstream reconciliation can catch hidden
+            # imbalance and a future Phase will add a positions-API verification.
+            size_filled = shares if accepted else 0.0
+            fill_confidence = "assumed_full" if accepted else "rejected"
+            if accepted:
+                log_order("PREDICT_FILL_ASSUMED_FULL",
+                          shares=shares, price=price,
+                          note="api_did_not_return_filled_size-treating_as_full")
+        else:
+            size_filled = filled
+            fill_confidence = "verified"
+            accepted = accepted and filled > 0
+        return {"platform": "predict", "ok": accepted, "size_filled": size_filled,
+                "fill_confidence": fill_confidence, "resp": resp,
+                "ms": (time.time() - t0) * 1000}
     except Exception as e:
         return {"platform": "predict", "ok": False, "size_filled": 0,
                 "error": f"{type(e).__name__}: {e}", "ms": (time.time() - t0) * 1000}
 
 
-def place_limitless(lt, leg, price, shares):
+def place_limitless(lt, leg, price, shares, dry_run=False):
     t0 = time.time()
+    if dry_run:
+        log_order("DRY_RUN_LIM_BUY", price=price, shares=shares, outcome=leg.get("outcome"))
+        return {"platform": "lim", "ok": True, "size_filled": shares,
+                "dry_run": True, "ms": (time.time() - t0) * 1000}
     try:
         size_usdc = round(shares * price, 4)
         slug = leg["slug"]
@@ -454,20 +541,28 @@ def place_limitless(lt, leg, price, shares):
 
 def fire_leg(ctx, leg, shares):
     """Dispatch to platform-specific BUY function."""
+    dry = ctx.get("dry_run", False)
     if leg["platform"] == "poly":
         return place_poly(ctx["poly_client"], ctx["OrderArgsV2"], ctx["OrderType"],
-                          leg, leg["ask"], shares)
+                          leg, leg["ask"], shares, dry_run=dry)
     if leg["platform"] == "predict":
         return place_predict(ctx["pt"], ctx["predict_meta"], ctx["predict_market_id"],
-                             leg, leg["ask"], shares)
+                             leg, leg["ask"], shares, dry_run=dry)
     if leg["platform"] == "lim":
-        return place_limitless(ctx["lt"], leg, leg["ask"], shares)
+        return place_limitless(ctx["lt"], leg, leg["ask"], shares, dry_run=dry)
     raise ValueError(f"unknown platform: {leg['platform']}")
 
 
 def emergency_sell(ctx, leg, excess_shares):
-    """Aggressive FAK sell of excess shares on the over-filled platform."""
+    """Aggressive FAK sell of excess shares on the over-filled platform.
+
+    Returns {"ok": bool, "size_filled": float, "platform": str}. Caller MUST
+    verify ok+size_filled before clearing window_has_unhedged.
+    """
     log_order("EMERGENCY_SELL_TRY", platform=leg["platform"], excess=excess_shares)
+    if ctx.get("dry_run"):
+        log_order("EMERGENCY_SELL_DRY_RUN", platform=leg["platform"], excess=excess_shares)
+        return {"ok": True, "size_filled": excess_shares, "platform": leg["platform"], "dry_run": True}
     try:
         if leg["platform"] == "poly":
             sell_args = ctx["OrderArgsV2"](
@@ -476,8 +571,12 @@ def emergency_sell(ctx, leg, excess_shares):
                 side="SELL", token_id=str(leg["token"]),
             )
             resp = ctx["poly_client"].create_and_post_order(sell_args, order_type=ctx["OrderType"].FAK)
-            log_order("EMERGENCY_SELL_POLY", status=(resp or {}).get("status"))
-        elif leg["platform"] == "predict":
+            status = (resp or {}).get("status")
+            matched = float((resp or {}).get("size_matched") or 0)
+            ok = status == "matched" and matched > 0
+            log_order("EMERGENCY_SELL_POLY", status=status, matched=matched, ok=ok)
+            return {"ok": ok, "size_filled": matched if ok else 0.0, "platform": "poly"}
+        if leg["platform"] == "predict":
             outcome = next(o for o in ctx["predict_meta"]["outcomes"]
                            if o["name"] == leg["outcome"])
             resp = ctx["pt"].place_limit(
@@ -489,18 +588,42 @@ def emergency_sell(ctx, leg, excess_shares):
                 is_yield_bearing=ctx["predict_meta"]["isYieldBearing"],
                 fee_rate_bps=ctx["predict_meta"]["feeRateBps"],
             )
-            log_order("EMERGENCY_SELL_PREDICT", code=resp.get("code"))
-        elif leg["platform"] == "lim":
+            code = resp.get("code")
+            order_id = resp.get("orderId")
+            raw = resp.get("raw") if isinstance(resp.get("raw"), dict) else resp
+            filled_raw = (raw.get("filledSize") or raw.get("size_matched")
+                          or raw.get("matched_size") or raw.get("matchedSize"))
+            try:
+                filled = float(filled_raw) if filled_raw is not None else None
+            except (TypeError, ValueError):
+                filled = None
+            accepted = bool(order_id) and code == "OK"
+            # CRITICAL: emergency sell is the last line of defense. If the API
+            # accepts but does not echo fill size, we MUST NOT assume the sell
+            # succeeded — that would clear window_has_unhedged on phantom data.
+            # Treat unknown fill as zero so the caller keeps the window blocked.
+            if filled is None:
+                filled = 0.0
+                log_order("EMERGENCY_SELL_PREDICT_UNKNOWN_FILL", code=code, order_id=order_id,
+                          note="api_accepted_but_no_fill_size_returned-treating_as_zero")
+            ok = accepted and filled > 0
+            log_order("EMERGENCY_SELL_PREDICT", code=code, filled=filled, ok=ok)
+            return {"ok": ok, "size_filled": filled if ok else 0.0, "platform": "predict"}
+        if leg["platform"] == "lim":
             slug = leg["slug"]
             market = ctx["lt"].cache_market(slug)
             token_id = market.tokens.yes if leg["outcome"] == "yes" else market.tokens.no
             sell_price = max(round(leg["ask"] - 0.05, 4), 0.01)
             res = ctx["lt"].place_fak_sell(market_slug=slug, token_id=str(token_id),
                                             price=sell_price, size_shares=excess_shares)
-            log_order("EMERGENCY_SELL_LIM", filled=res.get("filled_shares"))
+            filled = float(res.get("filled_shares") or 0)
+            ok = filled > 0
+            log_order("EMERGENCY_SELL_LIM", filled=filled, ok=ok)
+            return {"ok": ok, "size_filled": filled, "platform": "lim"}
     except Exception as e:
         log_order("EMERGENCY_SELL_ERROR", platform=leg["platform"],
                   err=f"{type(e).__name__}: {e}")
+    return {"ok": False, "size_filled": 0.0, "platform": leg["platform"]}
 
 
 def main():
@@ -510,6 +633,8 @@ def main():
     ap.add_argument("--invest", type=float, default=MAX_SIDE_USD)
     ap.add_argument("--stop-on-loss", action="store_true", default=True)
     ap.add_argument("--settle-wait-sec", type=int, default=SETTLE_WAIT_SEC)
+    ap.add_argument("--dry-run", action="store_true", default=False,
+                    help="run full strategy but log orders instead of submitting")
     args = ap.parse_args()
 
     print(f"=== arb_v5_3way_live (15min) starting at {now_iso()} ===", flush=True)
@@ -550,7 +675,10 @@ def main():
         "pt": pt, "lt": lt, "poly_client": poly_client,
         "OrderArgsV2": OrderArgsV2, "OrderType": OrderType,
         "predict_meta": None, "predict_market_id": None,
+        "dry_run": args.dry_run,
     }
+    if args.dry_run:
+        print("--- DRY RUN MODE: orders will be logged not submitted ---", flush=True)
 
     pool = ThreadPoolExecutor(max_workers=3)
 
@@ -569,17 +697,24 @@ def main():
                     print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s...", flush=True)
                     time.sleep(args.settle_wait_sec)
                     close_snap = snapshot_wealth(pt, poly_client, lt)
-                    wealth_delta = close_snap["total"] - window_open_wealth["total"]
-                    window_pnl = wealth_delta if trades_this_window > 0 else 0.0
+                    if not close_snap.get("valid") or not window_open_wealth.get("valid"):
+                        log_order("WEALTH_SNAPSHOT_INVALID",
+                                  close_missing=close_snap.get("missing", []),
+                                  open_missing=window_open_wealth.get("missing", []))
+                        window_pnl = 0.0  # neutral, do not infer PnL from incomplete data
+                    else:
+                        wealth_delta = close_snap["total"] - window_open_wealth["total"]
+                        window_pnl = wealth_delta if trades_this_window > 0 else 0.0
                     cumulative_pnl += window_pnl
                     log_order("WINDOW_CLOSE",
                               window=current_epoch, trades=trades_this_window,
                               wealth_before=round(window_open_wealth["total"], 4),
                               wealth_after=round(close_snap["total"], 4),
                               window_pnl=round(window_pnl, 4),
-                              cum_pnl=round(cumulative_pnl, 4))
+                              cum_pnl=round(cumulative_pnl, 4),
+                              snap_valid=close_snap.get("valid"))
                     windows_done += 1
-                    if args.stop_on_loss and window_pnl < 0:
+                    if args.stop_on_loss and close_snap.get("valid") and window_pnl < 0:
                         print(f"\n!!! STOP: window PnL ${window_pnl:+.4f} < 0. cumulative ${cumulative_pnl:+.4f}", flush=True)
                         break
                     if windows_done >= args.max_windows:
@@ -588,11 +723,19 @@ def main():
                 current_epoch = window_epoch
                 trades_this_window = 0
                 window_has_unhedged = False
-                try:
-                    poly_market = fetch_poly_market(window_epoch)
-                except Exception as e:
-                    poly_market = None
-                    log_order("POLY_MARKET_FETCH_ERR", err=f"{type(e).__name__}: {e}")
+                poly_market = None
+                for attempt in range(3):
+                    try:
+                        poly_market = fetch_poly_market(window_epoch)
+                        if poly_market:
+                            break
+                    except Exception as e:
+                        log_order("POLY_MARKET_FETCH_RETRY",
+                                  attempt=attempt + 1,
+                                  err=f"{type(e).__name__}: {e}")
+                        time.sleep(2 ** attempt)
+                if poly_market is None:
+                    log_order("POLY_MARKET_FETCH_EXHAUSTED", epoch=window_epoch)
                 try:
                     predict_market_id = get_current_predict_market_id()
                     predict_meta = pt.get_market(predict_market_id)
@@ -630,7 +773,8 @@ def main():
             cands = build_candidates(
                 p, pr, lim if fresh_lim else None, poly_market, predict_meta,
             )
-            best = pick_best(cands)
+            sec_to_close = (current_epoch + WINDOW_SEC) - now_e if current_epoch else None
+            best = pick_best(cands, sec_to_close=sec_to_close)
             if not best:
                 time.sleep(POLL_SEC)
                 continue
@@ -698,36 +842,56 @@ def main():
                 continue
 
             if shortfall > 0:
-                # Identify the under-filled leg and try to top up from the 3rd platform
                 under_idx = sizes.index(smaller)
                 under_leg = best["legs"][under_idx]
+                under_oracle = under_leg.get("oracle") or ORACLE_BY_PLATFORM.get(under_leg["platform"])
+                # Find a third platform NOT used in the current pair whose oracle
+                # matches the under-filled leg. Matching the oracle preserves the
+                # hedge invariant: the original pair was {under_oracle outcome=X}
+                # plus {other_oracle outcome=~X}. To complete the missing X,
+                # the third leg must settle under the same oracle as under_leg.
                 third_platform = None
                 for plat in ("lim", "poly", "predict"):
                     if plat == under_leg["platform"]:
                         continue
                     if plat in [l["platform"] for l in best["legs"]]:
                         continue
+                    if ORACLE_BY_PLATFORM.get(plat) != under_oracle:
+                        continue
                     third_platform = plat
                     break
                 if third_platform:
-                    log_order("TOPUP_TRY", under=under_leg["platform"], shortfall=round(shortfall, 4),
-                              third=third_platform)
-                    # Build a synthetic leg for the third platform matching the under-filled outcome.
-                    # Outcome semantics: we want the same direction-betting outcome as under_leg.
-                    # Map to platform-specific identifiers.
+                    log_order("TOPUP_TRY", under=under_leg["platform"],
+                              shortfall=round(shortfall, 4),
+                              third=third_platform, oracle=under_oracle)
                     third_leg = None
-                    if third_platform == "lim" and lim and under_leg["outcome"] in ("Up", "yes"):
-                        third_leg = {"platform": "lim", "side": "BUY", "outcome": "yes",
-                                     "ask": lim["up_ask"], "slug": lim["slug"]}
+                    if third_platform == "lim" and lim:
+                        if under_leg["outcome"] in ("Up", "yes") and lim["up_ask"] > 0:
+                            third_leg = {"platform": "lim", "oracle": "chainlink",
+                                         "side": "BUY", "outcome": "yes",
+                                         "ask": lim["up_ask"], "slug": lim["slug"]}
+                        elif under_leg["outcome"] in ("Down", "no") and lim.get("down_ask", 0) > 0:
+                            third_leg = {"platform": "lim", "oracle": "chainlink",
+                                         "side": "BUY", "outcome": "no",
+                                         "ask": lim["down_ask"], "slug": lim["slug"]}
                     elif third_platform == "poly" and poly_market:
-                        token = poly_market["up_token"] if under_leg["outcome"] in ("Up", "yes") else poly_market["down_token"]
-                        ask = p["ua"] if under_leg["outcome"] in ("Up", "yes") else p["da"]
-                        third_leg = {"platform": "poly", "side": "BUY", "outcome": under_leg["outcome"],
-                                     "ask": ask, "token": token}
+                        if under_leg["outcome"] in ("Up", "yes") and p["ua"] > 0:
+                            third_leg = {"platform": "poly", "oracle": "chainlink",
+                                         "side": "BUY", "outcome": "Up",
+                                         "ask": p["ua"], "token": poly_market["up_token"]}
+                        elif under_leg["outcome"] in ("Down", "no") and p["da"] > 0:
+                            third_leg = {"platform": "poly", "oracle": "chainlink",
+                                         "side": "BUY", "outcome": "Down",
+                                         "ask": p["da"], "token": poly_market["down_token"]}
                     elif third_platform == "predict" and predict_meta:
-                        third_leg = {"platform": "predict", "side": "BUY",
-                                     "outcome": "Up" if under_leg["outcome"] in ("Up", "yes") else "Down",
-                                     "ask": pr["yes_ask"] if under_leg["outcome"] in ("Up", "yes") else pr["no_ask_implied"]}
+                        if under_leg["outcome"] in ("Up", "yes") and pr["yes_ask"] > 0:
+                            third_leg = {"platform": "predict", "oracle": "binance",
+                                         "side": "BUY", "outcome": "Up",
+                                         "ask": pr["yes_ask"]}
+                        elif under_leg["outcome"] in ("Down", "no") and pr["no_ask_implied"] > 0:
+                            third_leg = {"platform": "predict", "oracle": "binance",
+                                         "side": "BUY", "outcome": "Down",
+                                         "ask": pr["no_ask_implied"]}
                     if third_leg and third_leg.get("ask", 0) > 0 and third_leg["ask"] <= SINGLE_LEG_MAX_ASK:
                         topup_res = fire_leg(ctx, third_leg, round(shortfall, 4))
                         log_order("TOPUP_RESULT",
@@ -739,22 +903,43 @@ def main():
                             larger = max(sizes)
                             smaller = min(sizes)
                             shortfall = larger - smaller
+                    else:
+                        log_order("TOPUP_SKIPPED", reason="no_valid_third_leg",
+                                  oracle_needed=under_oracle)
+                else:
+                    log_order("TOPUP_SKIPPED", reason="no_third_platform_same_oracle",
+                              oracle_needed=under_oracle)
 
-            # Emergency-sell only if remaining excess > 10% of larger side
+            # Emergency-sell only if remaining excess > EXCESS_SELL_PCT of larger side
             if larger > 0 and (shortfall / larger) > EXCESS_SELL_PCT:
                 over_idx = sizes.index(larger)
                 over_leg = best["legs"][over_idx]
-                log_order("EXCESS_OVER_10PCT",
+                log_order("EXCESS_OVER_THRESHOLD",
                           over=over_leg["platform"], larger=round(larger, 4),
-                          smaller=round(smaller, 4), shortfall=round(shortfall, 4))
-                emergency_sell(ctx, over_leg, shortfall)
-                window_has_unhedged = True
-                log_order("WINDOW_BLOCKED", reason="emergency_sell", window=current_epoch)
+                          smaller=round(smaller, 4), shortfall=round(shortfall, 4),
+                          threshold=EXCESS_SELL_PCT)
+                sell_res = emergency_sell(ctx, over_leg, shortfall)
+                if sell_res["ok"] and sell_res["size_filled"] >= shortfall * 0.95:
+                    log_order("EMERGENCY_SELL_RESOLVED",
+                              filled=round(sell_res["size_filled"], 4),
+                              shortfall=round(shortfall, 4))
+                    window_has_unhedged = False
+                else:
+                    log_order("EMERGENCY_SELL_FAILED_KEEP_UNHEDGED",
+                              filled=round(sell_res["size_filled"], 4),
+                              remaining=round(shortfall - sell_res["size_filled"], 4))
+                    window_has_unhedged = True
+                log_order("WINDOW_BLOCKED", reason="emergency_sell_attempted",
+                          window=current_epoch)
             elif shortfall > 0:
-                log_order("ACCEPT_SMALL_IMBALANCE",
+                # Accept the small imbalance financially (cost of unwind > risk)
+                # but BLOCK the rest of the window: residual exposure can compound
+                # across trades in the same window if max-trades > 1.
+                log_order("ACCEPT_SMALL_IMBALANCE_BLOCK_WINDOW",
                           larger=round(larger, 4), smaller=round(smaller, 4),
                           shortfall=round(shortfall, 4),
                           pct=round(shortfall/larger*100, 2))
+                window_has_unhedged = True
 
             last_open_ts[key] = time.time()
             trades_this_window += 1
