@@ -59,7 +59,7 @@ INVEST_PER_SIDE_TARGET = 100.0
 INVEST_MIN = 5.0
 COST_THRESHOLD = 0.90
 SINGLE_LEG_MAX_ASK = 0.80
-MAX_TRADES_PER_MARKET = 15
+MAX_TRADES_PER_MARKET = 1
 COOLDOWN_SEC = 5
 POLL_SEC = 2
 MAX_FEED_AGE_SEC = 10
@@ -336,6 +336,11 @@ def settle_trade_if_ready(tid):
     CLOSED_TRADES.append(t)
     print(f"SETTLED #{tid} {direction} {pattern} pnl={color_money(pnl)} ({pnl_pct:+.1f}%)")
     del OPEN_TRADES[tid]
+    # STOP-ON-LOSS: exit virtual bot if trade lost money
+    if pnl < 0:
+        print("!!! STOP: trade pnl < 0. Exiting virtual bot.")
+        import sys
+        sys.exit(0)
     return True
 
 
