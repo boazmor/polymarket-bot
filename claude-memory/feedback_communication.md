@@ -33,3 +33,43 @@ This isolates the English so RTL flow stays predictable.
 
 **Never write:** "LIVE earned $200 more than V3" in flowing Hebrew.
 **Instead write:** "הבוט החי הרוויח $200 יותר מהניסיוני" — pure Hebrew except the dollar amount.
+
+## ⚠️ CRITICAL #2 — Markdown tables and dense text break RTL (added 2026-05-04)
+
+User reported AGAIN that even tables get garbled. PowerShell on Windows doesn't render markdown tables in RTL — borders and columns get scrambled, words mix between cells.
+
+**The rule for chat output:**
+- **NO markdown tables in Hebrew responses.** Use plain bullets instead.
+- **One concept per line.** Keep lines short.
+- **Numbers are FINE inline with Hebrew** — Hebrew uses Arabic numerals (0-9) same as English, no RTL conflict. "סף 60 ומחיר 0.65" reads correctly.
+- The actual RTL problem is ONLY with **English WORDS** mixed into Hebrew sentences (BOT120, LIVE, V3 etc) — those flip word order on screen.
+- For commands and code, keep using ``` ``` blocks (those render fine).
+- For lists, use `-` or `*` bullets — they wrap one item per line.
+- For multi-row comparison data, use simple line-per-item format, not tables:
+  ```
+  BTC: חציון 0.043%
+  ETH: חציון 0.051%
+  ```
+
+The user has to spend mental effort decoding garbled RTL. Save them that effort.
+
+## ⚠️ CRITICAL #3 — Explanations: short sentences, minimal English (added 2026-05-09)
+
+User explicitly asked for short explanations with very little English. Long paragraphs and English jargon make explanations harder to follow.
+
+**The rule for explanations:**
+- **One idea per line.** Use line breaks generously.
+- **Each line is a complete thought** — preferably one short sentence.
+- **No commas chaining multiple clauses** — split into separate lines instead.
+- **Minimize English completely** — even transliterated terms should be used sparingly.
+- **No parentheses** — they break RTL flow. Use commas, em-dashes, or new lines.
+
+**Bad example:**
+"פרדי מרוויח יותר כי הוא מנצח ב-64 אחוז (בעוד פולי רק 28%), והפער בניצחונות גדול בהרבה מהפער ב-investment."
+
+**Good example:**
+"פרדי מנצח ב-64 אחוז.
+פולי מנצח רק ב-28 אחוז.
+הפער בניצחונות גדול הרבה יותר מהפער בהשקעה."
+
+The user has limited time and reads explanations quickly. Visual scanning beats dense paragraphs.
