@@ -43,7 +43,7 @@ PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
 LIVE_TRADES = "/root/arb_v6_live_trades.csv"
 LIVE_ORDERS = "/root/arb_v6_live_orders.csv"
 
-INVEST_PER_SIDE = 5.0
+INVEST_PER_SIDE = 7.0
 COST_THRESHOLD = 0.90   # tighter threshold = insurance reserve for unhedged tail risk
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_WINDOW = 5
@@ -351,12 +351,9 @@ def main():
                 time.sleep(POLL_SEC)
                 continue
 
-            # Compute symmetric shares for $invest budget
+            # Use the shares from the new base/cap sizing logic computed above
             max_price = max(p_ask, pr_ask)
-            shares = round(args.invest / max_price, 2)
-            if shares * max_price < 1.0:  # below typical platform mins
-                time.sleep(POLL_SEC)
-                continue
+            shares = _shares_planned
 
             predict_outcome = next(o for o in current_predict_meta["outcomes"]
                                    if o["name"] == predict_outcome_name)
@@ -412,13 +409,21 @@ def main():
                 log_order("SKIP_LOW_DEPTH", poly_depth=poly_depth_usd, pred_depth=pred_depth_usd, min=MIN_DEPTH_USD)
                 time.sleep(POLL_SEC)
                 continue
-            # Pre-check: smallest side must meet $1 minimum (Predict requirement)
-            _max_p = max(p_ask, pr_ask)
-            _shares_planned = round(args.invest / _max_p, 2) if _max_p else 0
+            # New sizing rule: base = $1.20 on smaller side. Cap = $7 on bigger side.
             _min_p = min(p_ask, pr_ask)
-            _min_notional = _shares_planned * _min_p
-            if _min_notional < 1.0:
-                log_order("SKIP_BELOW_MIN_NOTIONAL", min_side_usd=round(_min_notional, 4), min_ask=_min_p, shares=_shares_planned)
+            _max_p = max(p_ask, pr_ask)
+            if _min_p <= 0 or _max_p <= 0:
+                time.sleep(POLL_SEC)
+                continue
+            BASE_NOTIONAL_USD = 1.20
+            MAX_SIDE_USD = 7.0
+            _shares_planned = round(BASE_NOTIONAL_USD / _min_p, 2)
+            _max_side_cost = _shares_planned * _max_p
+            if _max_side_cost > MAX_SIDE_USD:
+                log_order("SKIP_MAX_SIDE_OVER_CAP",
+                          min_ask=_min_p, max_ask=_max_p,
+                          shares=_shares_planned, max_side_cost=round(_max_side_cost, 4),
+                          cap=MAX_SIDE_USD)
                 time.sleep(POLL_SEC)
                 continue
             poly_first = p_ask <= pr_ask
