@@ -32,11 +32,13 @@ PR = "/root/data_predict_btc_5m/combined_per_second.csv"
 PM_OUTCOMES = "/root/research/multi_coin/data_btc_5m_research/market_outcomes.csv"
 LOG = "/root/arb_v7_5m_predict_trades.csv"
 
-INVEST_PER_SIDE_TARGET = 100.0
 INVEST_MIN = 5.0
 COST_THRESHOLD = 0.90
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_MARKET = 15
+MIN_DEPTH_USD = 50.0
+MIN_NOTIONAL_USD = 1.2
+INVEST_PER_SIDE_TARGET = 5.0  # match live setting
 COOLDOWN_SEC = 5
 POLL_SEC = 2
 MAX_FEED_AGE_SEC = 10
@@ -405,14 +407,16 @@ def main():
                 for direction, cost, p_ask, pr_ask, p_depth, pr_depth in cands:
                     if cost > COST_THRESHOLD: continue
                     if p_ask > SINGLE_LEG_MAX_ASK or pr_ask > SINGLE_LEG_MAX_ASK: continue
-                    # Symmetric shares: invest/max_price
-                    # Depth: 50% of min depth
-                    min_depth = min(p_depth, pr_depth)
-                    if min_depth <= 0: continue
-                    invest_per_side = min(INVEST_PER_SIDE_TARGET, min_depth / 2)
-                    if invest_per_side < INVEST_MIN: continue
+                    # NEW: require min depth on both sides (mirrors V5 LIVE filter)
+                    if p_depth < MIN_DEPTH_USD or pr_depth < MIN_DEPTH_USD: continue
+                    # NEW: ensure smaller-leg notional >= .20 (Predict.fun minimum + buffer)
                     max_price = max(p_ask, pr_ask)
-                    shares = invest_per_side / max_price
+                    shares_planned = INVEST_PER_SIDE_TARGET / max_price
+                    min_notional = shares_planned * min(p_ask, pr_ask)
+                    if min_notional < MIN_NOTIONAL_USD: continue
+                    invest_per_side = INVEST_PER_SIDE_TARGET
+                    if invest_per_side < INVEST_MIN: continue
+                    shares = shares_planned
                     invest = shares * (p_ask + pr_ask)
                     market_id = (p['slug'], pr['market_id'])
                     if market_count.get(market_id, 0) >= MAX_TRADES_PER_MARKET: continue
