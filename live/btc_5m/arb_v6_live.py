@@ -184,7 +184,7 @@ def get_current_predict_market_id():
 # ---- main ----
 
 def snapshot_wealth(pt, poly_client):
-    """Return total wealth: USDT on BNB + Predict open positions value + Polymarket USDC."""
+    """Return total wealth: USDT on BNB + Predict positions value + Polymarket USDC + Polymarket positions value."""
     from web3 import Web3
     from predict_sdk import ChainId, ADDRESSES_BY_CHAIN_ID, RPC_URLS_BY_CHAIN_ID, ERC20_ABI
     addrs = ADDRESSES_BY_CHAIN_ID[ChainId.BNB_MAINNET]
@@ -193,12 +193,13 @@ def snapshot_wealth(pt, poly_client):
     eoa = Web3.to_checksum_address(pt.address)
     usdt_balance = usdt.functions.balanceOf(eoa).call() / 1e18
 
-    # Predict positions: include both OPEN value and WON/LOST settled value (since they map to USDT eventually)
+    # Predict positions
     positions = pt.get_positions()
     predict_pos_value = sum(float(p.get("valueUsd") or 0) for p in positions)
 
-    # Polymarket USDC
+    # Polymarket USDC + open positions
     poly_usdc = 0
+    poly_positions_value = 0
     try:
         from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
@@ -206,12 +207,30 @@ def snapshot_wealth(pt, poly_client):
         poly_usdc = int(resp["balance"]) / 1e6
     except Exception:
         pass
+    # Polymarket position value via /data/positions API (proxy address is the Safe)
+    try:
+        import urllib.request, json as _json
+        url = "https://data-api.polymarket.com/positions?user=0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B&limit=100"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+        # Sum currentValue across open positions
+        for p in (data if isinstance(data, list) else []):
+            cv = p.get("currentValue") or p.get("current_value") or 0
+            try:
+                poly_positions_value += float(cv)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
 
+    total = usdt_balance + predict_pos_value + poly_usdc + poly_positions_value
     return {
         "usdt": usdt_balance,
         "predict_positions": predict_pos_value,
         "poly_usdc": poly_usdc,
-        "total": usdt_balance + predict_pos_value + poly_usdc,
+        "poly_positions": poly_positions_value,
+        "total": total,
     }
 
 
