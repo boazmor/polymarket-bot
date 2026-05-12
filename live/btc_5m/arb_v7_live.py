@@ -362,6 +362,17 @@ def main():
                 time.sleep(POLL_SEC)
                 continue
 
+            # Require min depth on both sides
+            poly_depth = best[4] if best else 0  # ua_usd or da_usd from candidate tuple
+            pred_depth = best[5] if best else 0  # no_ask_usd or yes_ask_usd
+            # Recompute: best tuple is (direction, cost, p_ask, pr_ask, p_token, pr_outcome_name)
+            # so depth is not in best — read from parsed data
+            if direction == "A":
+                poly_depth_usd = p["ua_usd"]
+                pred_depth_usd = pr["no_ask_usd"]
+            else:
+                poly_depth_usd = p["da_usd"]
+                pred_depth_usd = pr["yes_ask_usd"]
             if poly_depth_usd < MIN_DEPTH_USD or pred_depth_usd < MIN_DEPTH_USD:
                 log_order("SKIP_LOW_DEPTH", poly_depth=poly_depth_usd, pred_depth=pred_depth_usd, min=MIN_DEPTH_USD)
                 time.sleep(POLL_SEC)
@@ -426,17 +437,6 @@ def main():
                 except Exception as e:
                     return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
-            # Require min depth on both sides
-            poly_depth = best[4] if best else 0  # ua_usd or da_usd from candidate tuple
-            pred_depth = best[5] if best else 0  # no_ask_usd or yes_ask_usd
-            # Recompute: best tuple is (direction, cost, p_ask, pr_ask, p_token, pr_outcome_name)
-            # so depth is not in best — read from parsed data
-            if direction == "A":
-                poly_depth_usd = p["ua_usd"]
-                pred_depth_usd = pr["no_ask_usd"]
-            else:
-                poly_depth_usd = p["da_usd"]
-                pred_depth_usd = pr["yes_ask_usd"]
             poly_first = p_ask <= pr_ask
             if poly_first:
                 poly_resp, poly_err, poly_ms = do_poly()
