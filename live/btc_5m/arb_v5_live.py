@@ -6,6 +6,7 @@ places orders on both Polymarket and Predict.fun.
 
 Caps:
 - MAX_TRADES_PER_WINDOW = 5
+MIN_DEPTH_USD = 50.0  # require this much offered depth on EACH side before opening
 - INVEST_PER_SIDE = 5.0 USD (small test size)
 
 Output:
@@ -43,9 +44,10 @@ LIVE_TRADES = "/root/arb_v5_live_trades.csv"
 LIVE_ORDERS = "/root/arb_v5_live_orders.csv"
 
 INVEST_PER_SIDE = 5.0
-COST_THRESHOLD = 0.88   # tighter threshold = insurance reserve for unhedged tail risk
+COST_THRESHOLD = 0.90   # tighter threshold = insurance reserve for unhedged tail risk
 SINGLE_LEG_MAX_ASK = 0.80
 MAX_TRADES_PER_WINDOW = 5
+MIN_DEPTH_USD = 50.0  # require this much offered depth on EACH side before opening
 COOLDOWN_SEC = 5
 POLL_SEC = 0.1
 MAX_FEED_AGE_SEC = 10
@@ -388,6 +390,30 @@ def main():
                 except Exception as e:
                     return None, f"{type(e).__name__}: {e}", (time.time() - t0) * 1000
 
+            # Require min depth on both sides
+            poly_depth = best[4] if best else 0  # ua_usd or da_usd from candidate tuple
+            pred_depth = best[5] if best else 0  # no_ask_usd or yes_ask_usd
+            # Recompute: best tuple is (direction, cost, p_ask, pr_ask, p_token, pr_outcome_name)
+            # so depth is not in best — read from parsed data
+            if direction == "A":
+                poly_depth_usd = p["ua_usd"]
+                pred_depth_usd = pr["no_ask_usd"]
+            else:
+                poly_depth_usd = p["da_usd"]
+                pred_depth_usd = pr["yes_ask_usd"]
+            if poly_depth_usd < MIN_DEPTH_USD or pred_depth_usd < MIN_DEPTH_USD:
+                log_order("SKIP_LOW_DEPTH", poly_depth=poly_depth_usd, pred_depth=pred_depth_usd, min=MIN_DEPTH_USD)
+                time.sleep(POLL_SEC)
+                continue
+            # Pre-check: smallest side must meet $1 minimum (Predict requirement)
+            _max_p = max(p_ask, pr_ask)
+            _shares_planned = round(args.invest / _max_p, 2) if _max_p else 0
+            _min_p = min(p_ask, pr_ask)
+            _min_notional = _shares_planned * _min_p
+            if _min_notional < 1.0:
+                log_order("SKIP_BELOW_MIN_NOTIONAL", min_side_usd=round(_min_notional, 4), min_ask=_min_p, shares=_shares_planned)
+                time.sleep(POLL_SEC)
+                continue
             poly_first = p_ask <= pr_ask
             if poly_first:
                 poly_resp, poly_err, poly_ms = do_poly()
@@ -452,7 +478,7 @@ def main():
                 # poly was just live, cancel succeeded — no exposure, no need to block
             elif not poly_ok and pred_ok:
                 # Predict filled but Poly failed — RETRY Poly with aggressive limit BUY before falling back to Predict SELL
-                cap_price = round(0.99 - pr_ask, 4)
+                cap_price = round(0.90 - pr_ask, 4)
                 log_order("UNHEDGED_PRED_FILLED_RETRY",
                           note="retry poly BUY at cap_price",
                           cap_price=cap_price, pr_ask=pr_ask, shares=shares)
