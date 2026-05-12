@@ -164,14 +164,23 @@ def parse_limitless_latest():
             d = json.load(f)
     except Exception:
         return None
+    up_ask = float(d.get("best_ask", 0))
+    up_bid = float(d.get("best_bid", 0))
+    up_ask_usd = float(d.get("best_ask_size_usd", 0))
+    up_bid_usd = float(d.get("best_bid_size_usd", 0))
+    # NO outcome: CTF complement of YES. Prefer explicit fields if recorder wrote them.
+    down_ask = float(d.get("no_best_ask", round(1.0 - up_bid, 4) if up_bid > 0 else 0))
+    down_ask_usd = float(d.get("no_best_ask_size_usd", up_bid_usd))
     return {
         "epoch": int(d.get("ts_ms", 0) // 1000),
         "market_id": d.get("market_id", ""),
         "slug": d.get("slug", ""),
-        "up_ask": float(d.get("best_ask", 0)),
-        "up_bid": float(d.get("best_bid", 0)),
-        "up_ask_usd": float(d.get("best_ask_size_usd", 0)),
-        "up_bid_usd": float(d.get("best_bid_size_usd", 0)),
+        "up_ask": up_ask,
+        "up_bid": up_bid,
+        "up_ask_usd": up_ask_usd,
+        "up_bid_usd": up_bid_usd,
+        "down_ask": down_ask,
+        "down_ask_usd": down_ask_usd,
     }
 
 
@@ -320,6 +329,31 @@ def build_candidates(p, pr, lim, poly_market, predict_meta):
                 {"platform": "poly", "side": "BUY", "outcome": "Down",
                  "ask": p["da"], "depth_usd": p["da_usd"],
                  "token": poly_market["down_token"] if poly_market else None},
+            ],
+        })
+    if lim and pr and lim.get("down_ask", 0) > 0 and pr["yes_ask"] > 0:
+        cands.append({
+            "direction": "B_LIM",
+            "cost": lim["down_ask"] + pr["yes_ask"],
+            "legs": [
+                {"platform": "lim", "side": "BUY", "outcome": "no",
+                 "ask": lim["down_ask"], "depth_usd": lim["down_ask_usd"],
+                 "slug": lim["slug"]},
+                {"platform": "predict", "side": "BUY", "outcome": "Up",
+                 "ask": pr["yes_ask"], "depth_usd": pr["yes_ask_usd"]},
+            ],
+        })
+    if p and lim and p["ua"] > 0 and lim.get("down_ask", 0) > 0:
+        cands.append({
+            "direction": "PolyUP_LimDN",
+            "cost": p["ua"] + lim["down_ask"],
+            "legs": [
+                {"platform": "poly", "side": "BUY", "outcome": "Up",
+                 "ask": p["ua"], "depth_usd": p["ua_usd"],
+                 "token": poly_market["up_token"] if poly_market else None},
+                {"platform": "lim", "side": "BUY", "outcome": "no",
+                 "ask": lim["down_ask"], "depth_usd": lim["down_ask_usd"],
+                 "slug": lim["slug"]},
             ],
         })
     return cands
