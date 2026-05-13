@@ -84,6 +84,10 @@ WINDOW_SEC = 900
 # placement is normally 100-300ms; 1.5s allows 5x slowdown headroom.
 ORDER_TIMEOUT_SEC = 0.8  # tightened from 1.5s after AI review: FAK that doesn't fill in 500-800ms is stale anyway
 POST_TRADE_MIN_SLEEP = 0.05  # floor for Change E so we don't busy-spin on a malformed feed
+# Phase 2 quote-freshness gates (per AI freshness review):
+MAX_QUOTE_AGE_MS = 80   # reject FAK if any leg's last update >80ms old
+MAX_QUOTE_AGE_SKEW_MS = 50  # reject if leg ages differ by >50ms (asymmetric staleness)
+LATE_FILL_GRACE_MS = 100  # after FAK fill=0, wait this long for late-fill notification
 
 ORACLE_BY_PLATFORM = {
     "poly": "chainlink",
@@ -164,8 +168,10 @@ def parse_predict_latest():
             d = json.load(f)
     except Exception:
         return None
+    ts_ms = int(d.get("ts_ms", 0))
     return {
-        "epoch": int(d.get("ts_ms", 0) // 1000),
+        "epoch": ts_ms // 1000,
+        "ts_ms": ts_ms,  # ms-precision recorder write timestamp for freshness check
         "market_id": d.get("market_id", ""),
         "yes_ask": float(d.get("yes_ask", 0)),
         "yes_bid": float(d.get("yes_bid", 0)),
@@ -190,8 +196,10 @@ def parse_limitless_latest():
     # Prefer explicit no_best_ask from recorder if available.
     down_ask = float(d.get("no_best_ask", round(1.0 - up_bid, 4) if up_bid > 0 else 0))
     down_ask_usd = float(d.get("no_best_ask_size_usd", up_bid_usd))
+    ts_ms = int(d.get("ts_ms", 0))
     return {
-        "epoch": int(d.get("ts_ms", 0) // 1000),
+        "epoch": ts_ms // 1000,
+        "ts_ms": ts_ms,  # ms-precision recorder write timestamp for freshness check
         "market_id": d.get("market_id", ""),
         "slug": d.get("slug", ""),
         "up_ask": up_ask,
@@ -453,6 +461,41 @@ def can_fire_parallel(cand, shares):
         if l["depth_usd"] < PARALLEL_DEPTH_MULTIPLIER * required_usd:
             return False
     return True
+
+
+def check_freshness(cand, p, pr, lim, now_ms):
+    """Verify each leg's underlying feed is fresh AND that the two legs are
+    not asymmetrically stale relative to each other. Returns (ok, reason, ages).
+
+    Why: a FAK opportunity on stale data is mostly a phantom — by the time
+    our order arrives, faster bots already cleared the level. Reject any
+    candidate where any leg is >MAX_QUOTE_AGE_MS old OR the leg ages differ
+    by more than MAX_QUOTE_AGE_SKEW_MS (one leg moved 200ms ago, the other
+    50ms ago: real cost is not what we think).
+    """
+    leg_ages_ms = []
+    for leg in cand["legs"]:
+        plat = leg["platform"]
+        if plat == "poly":
+            # Poly recorder writes second-precision epoch_sec. Convert to ms
+            # using bottom-of-second so we don't falsely look "fresh"; we lose
+            # some precision but the >80ms check still works in normal cases.
+            ts_ms_leg = (p["epoch"] * 1000) if p else 0
+        elif plat == "predict":
+            ts_ms_leg = pr.get("ts_ms", 0) if pr else 0
+        elif plat == "lim":
+            ts_ms_leg = lim.get("ts_ms", 0) if lim else 0
+        else:
+            ts_ms_leg = 0
+        age = now_ms - ts_ms_leg if ts_ms_leg > 0 else 999_999
+        leg_ages_ms.append(age)
+        if age > MAX_QUOTE_AGE_MS:
+            return False, f"stale_{plat}_{age}ms", leg_ages_ms
+    if len(leg_ages_ms) == 2:
+        skew = abs(leg_ages_ms[0] - leg_ages_ms[1])
+        if skew > MAX_QUOTE_AGE_SKEW_MS:
+            return False, f"asymmetric_skew_{skew}ms", leg_ages_ms
+    return True, "fresh", leg_ages_ms
 
 
 def place_poly(poly_client, OrderArgsV2, OrderType, leg, price, shares, dry_run=False):
@@ -905,6 +948,21 @@ def main():
             )
             sec_to_close = (current_epoch + WINDOW_SEC) - now_e if current_epoch else None
             best = pick_best(cands, sec_to_close=sec_to_close)
+
+            # Phase 2 freshness gate: reject FAK if quotes are stale or
+            # asymmetrically aged. Skip silently to avoid log spam — every
+            # 200ms-stale poll cycle would log otherwise.
+            if best:
+                fresh_ok, fresh_reason, leg_ages = check_freshness(
+                    best, p, pr, lim, int(time.time() * 1000)
+                )
+                if not fresh_ok:
+                    # Log only when we'd otherwise have fired (cost passes
+                    # threshold) so the log shows missed opportunities
+                    log_order("STALE_QUOTE_REJECT",
+                              dir=best["direction"], reason=fresh_reason,
+                              ages_ms=leg_ages, cost=round(best["cost"], 4))
+                    best = None
             if not best:
                 time.sleep(POLL_SEC)
                 continue
