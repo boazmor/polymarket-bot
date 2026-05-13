@@ -103,8 +103,12 @@ WINDOW_SEC = 3600
 ORDER_TIMEOUT_SEC = 0.8  # tightened from 1.5s after AI review: FAK that doesn't fill in 500-800ms is stale anyway
 POST_TRADE_MIN_SLEEP = 0.05  # floor for Change E so we don't busy-spin on a malformed feed
 # Phase 2 quote-freshness gates (per AI freshness review):
-MAX_QUOTE_AGE_MS = 80   # reject FAK if any leg's last update >80ms old
-MAX_QUOTE_AGE_SKEW_MS = 50  # reject if leg ages differ by >50ms (asymmetric staleness)
+MAX_QUOTE_AGE_MS = {  # per-platform after empirical data + AI review
+    'poly': 200,
+    'lim': 600,
+    'predict': 3000,
+}
+MAX_QUOTE_AGE_SKEW_MS = 500  # reject if leg ages differ by >500ms (asymmetric staleness, tightened from 1000)
 # LATE_FILL_GRACE_MS removed — late-fill probe deferred to Phase 3
 
 ORACLE_BY_PLATFORM = {
@@ -516,7 +520,8 @@ def check_freshness(cand, p, pr, lim, now_ms):
             ts_ms_leg = 0
         age = now_ms - ts_ms_leg if ts_ms_leg > 0 else 999_999
         leg_ages_ms.append(age)
-        if age > MAX_QUOTE_AGE_MS:
+        plat_limit = MAX_QUOTE_AGE_MS.get(plat, 500) if isinstance(MAX_QUOTE_AGE_MS, dict) else MAX_QUOTE_AGE_MS
+        if age > plat_limit:
             return False, f"stale_{plat}_{age}ms", leg_ages_ms
     if len(leg_ages_ms) == 2:
         skew = abs(leg_ages_ms[0] - leg_ages_ms[1])
