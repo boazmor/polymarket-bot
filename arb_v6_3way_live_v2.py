@@ -43,7 +43,9 @@ from datetime import datetime, timezone
 HTTP_POOL = urllib3.PoolManager(
     maxsize=10,
     block=False,
-    retries=urllib3.Retry(connect=2, read=2, backoff_factor=0.1),
+    # AI3 fix: connect retry only, NO read retries — read retries can turn a
+    # 200ms hiccup into a 2-4 second stall.
+    retries=urllib3.Retry(connect=1, read=0, backoff_factor=0.05),
     headers={"User-Agent": "Mozilla/5.0", "Connection": "keep-alive"},
 )
 
@@ -87,7 +89,7 @@ POST_TRADE_MIN_SLEEP = 0.05  # floor for Change E so we don't busy-spin on a mal
 # Phase 2 quote-freshness gates (per AI freshness review):
 MAX_QUOTE_AGE_MS = 80   # reject FAK if any leg's last update >80ms old
 MAX_QUOTE_AGE_SKEW_MS = 50  # reject if leg ages differ by >50ms (asymmetric staleness)
-LATE_FILL_GRACE_MS = 100  # after FAK fill=0, wait this long for late-fill notification
+# LATE_FILL_GRACE_MS removed — late-fill probe deferred to Phase 3
 
 ORACLE_BY_PLATFORM = {
     "poly": "chainlink",
@@ -474,20 +476,21 @@ def check_freshness(cand, p, pr, lim, now_ms):
     """Verify each leg's underlying feed is fresh AND that the two legs are
     not asymmetrically stale relative to each other. Returns (ok, reason, ages).
 
-    Why: a FAK opportunity on stale data is mostly a phantom — by the time
-    our order arrives, faster bots already cleared the level. Reject any
-    candidate where any leg is >MAX_QUOTE_AGE_MS old OR the leg ages differ
-    by more than MAX_QUOTE_AGE_SKEW_MS (one leg moved 200ms ago, the other
-    50ms ago: real cost is not what we think).
+    POLY note: the Polymarket recorder writes only second-precision
+    `epoch_sec` to its CSV. We use the file mtime of the CSV as a ms-precision
+    proxy for "last update time" — that's when the recorder last wrote a row,
+    which is its last received WS message.
     """
     leg_ages_ms = []
     for leg in cand["legs"]:
         plat = leg["platform"]
         if plat == "poly":
-            # Poly recorder writes second-precision epoch_sec. Convert to ms
-            # using bottom-of-second so we don't falsely look "fresh"; we lose
-            # some precision but the >80ms check still works in normal cases.
-            ts_ms_leg = (p["epoch"] * 1000) if p else 0
+            # BLOCKER 1 FIX: epoch_sec only gives second precision so it
+            # appears 0-999ms stale randomly. Use the CSV file mtime instead.
+            try:
+                ts_ms_leg = int(os.path.getmtime(P_DATA) * 1000)
+            except Exception:
+                ts_ms_leg = 0
         elif plat == "predict":
             ts_ms_leg = pr.get("ts_ms", 0) if pr else 0
         elif plat == "lim":
@@ -596,24 +599,24 @@ def place_predict(pt, predict_meta, current_predict_market, leg, price, shares, 
             fill_confidence = "assumed_full" if accepted else "rejected"
             if accepted and pre_shares is not None:
                 measured_delta = None
-                for attempt in range(3):
-                    try:
-                        post_positions = pt.get_positions()
-                        post_shares_for_outcome = 0.0
-                        for p in post_positions:
-                            pid = (p.get("marketId") or p.get("market_id")
-                                   or p.get("market") or "")
-                            oid = (p.get("outcomeId") or p.get("outcome_id")
-                                   or p.get("tokenId") or p.get("onChainId") or "")
-                            if str(pid) == str(current_predict_market) and str(oid) == outcome_token_id_str:
-                                post_shares_for_outcome += float(p.get("size") or p.get("shares") or 0)
-                        measured_delta = post_shares_for_outcome - pre_shares
-                        if measured_delta >= shares * 0.95:
-                            # delta confirms full or near-full fill
-                            break
-                        time.sleep(0.2)  # eventual consistency wait
-                    except Exception:
-                        break
+                # BLOCKER FIX (AI3): a single fast check, NO time.sleep.
+                # Sleeping 200ms 3x in the hot path delays each trade by up to
+                # 600ms. If positions API has eventual consistency, accept the
+                # uncertainty: better to under-report a fill than to block the
+                # main loop for half a second per trade.
+                try:
+                    post_positions = pt.get_positions()
+                    post_shares_for_outcome = 0.0
+                    for p in post_positions:
+                        pid = (p.get("marketId") or p.get("market_id")
+                               or p.get("market") or "")
+                        oid = (p.get("outcomeId") or p.get("outcome_id")
+                               or p.get("tokenId") or p.get("onChainId") or "")
+                        if str(pid) == str(current_predict_market) and str(oid) == outcome_token_id_str:
+                            post_shares_for_outcome += float(p.get("size") or p.get("shares") or 0)
+                    measured_delta = post_shares_for_outcome - pre_shares
+                except Exception:
+                    measured_delta = None
                 if measured_delta is not None and measured_delta >= shares * 0.10:
                     size_filled = measured_delta
                     fill_confidence = "reconciled" if measured_delta >= shares * 0.95 else "reconciled_partial"
@@ -632,9 +635,15 @@ def place_predict(pt, predict_meta, current_predict_market, leg, price, shares, 
                               shares=shares, price=price,
                               note="positions_api_unreachable_falling_back_to_assumed_full")
             elif accepted:
-                log_order("PREDICT_FILL_ASSUMED_FULL_NO_BASELINE",
+                # BLOCKER FIX (AI1): without a baseline we cannot reconcile, so
+                # we MUST NOT assume the order filled. Treat as rejected. Top-up
+                # and emergency-sell logic will handle the missing leg.
+                size_filled = 0.0
+                accepted = False
+                fill_confidence = "unverified_rejected"
+                log_order("PREDICT_REJECTED_NO_BASELINE",
                           shares=shares, price=price,
-                          note="pre_snapshot_unavailable")
+                          note="pre_snapshot_failed_cannot_verify_fill")
         else:
             size_filled = filled
             fill_confidence = "verified"
@@ -940,7 +949,8 @@ def main():
             fresh_pr = pr and pr_age <= MAX_FEED_AGE_SEC
             fresh_lim = lim and lim_age <= LIM_MAX_AGE_SEC
 
-            if not (fresh_p and fresh_pr and (fresh_lim or True) and poly_market and predict_meta):
+            # BLOCKER FIX (AI3): removed `or True` which was disabling fresh_lim
+            if not (fresh_p and fresh_pr and fresh_lim and poly_market and predict_meta):
                 time.sleep(POLL_SEC)
                 continue
             if trades_this_window >= args.max_trades_per_window:
@@ -995,11 +1005,10 @@ def main():
 
             t_detect = time.time()
             parallel = can_fire_parallel(best, shares)
-            # Change E: mark that we fired a trade this iteration so the
-            # end-of-loop sleep can be skipped — opportunities cluster, and a
-            # 200ms idle right after a fire wastes the chance to catch the
-            # next one.
-            trade_fired_this_iter = True
+            # BLOCKER 2 FIX: do NOT set trade_fired_this_iter here. If both
+            # legs fail (geoblock, timeout, network), we should sleep the full
+            # POLL_SEC instead of immediately retrying and hammering the APIs.
+            # The flag is set AFTER fills are verified, below.
 
             if parallel:
                 log_order("FIRE_PARALLEL", dir=best["direction"], shares=shares)
@@ -1022,7 +1031,9 @@ def main():
                 first_idx = thin_first[0]
                 second_idx = thin_first[1]
                 first_res = fire_leg(ctx, best["legs"][first_idx], shares)
-                actual = first_res["size_filled"] if first_res["ok"] else 0
+                # AI3 fix: clamp actual to requested shares to avoid second-leg
+                # mirroring an overfill (rare but possible on aggressive markets).
+                actual = min(first_res["size_filled"], shares) if first_res["ok"] else 0
                 results = [None, None]
                 results[first_idx] = first_res
                 if actual > 0:
@@ -1039,6 +1050,9 @@ def main():
                       legs=[r["platform"] for r in results],
                       sizes=[round(s, 4) for s in sizes],
                       total_ms=round(total_ms, 1))
+            # BLOCKER 2 FIX: only skip POLL_SEC if at least one leg succeeded
+            if any(r.get("ok") for r in results):
+                trade_fired_this_iter = True
 
             # Change A: geoblock detection. If ANY platform returned 403 or a
             # "restricted in your region" error, the bot is at an IP that
@@ -1140,16 +1154,21 @@ def main():
                           smaller=round(smaller, 4), shortfall=round(shortfall, 4),
                           threshold=EXCESS_SELL_PCT)
                 sell_res = emergency_sell(ctx, over_leg, shortfall)
+                # BLOCKER FIX (AI1): do NOT clear window_has_unhedged based on
+                # inferred fill from the sell response. Without authoritative
+                # cross-platform position reconciliation, we cannot prove the
+                # net exposure is actually zero. Keep the window blocked until
+                # the next window opens fresh.
                 if sell_res["ok"] and sell_res["size_filled"] >= shortfall * 0.95:
-                    log_order("EMERGENCY_SELL_RESOLVED",
+                    log_order("EMERGENCY_SELL_REPORTED_OK",
                               filled=round(sell_res["size_filled"], 4),
-                              shortfall=round(shortfall, 4))
-                    window_has_unhedged = False
+                              shortfall=round(shortfall, 4),
+                              note="window_still_blocked_until_next_for_safety")
                 else:
                     log_order("EMERGENCY_SELL_FAILED_KEEP_UNHEDGED",
                               filled=round(sell_res["size_filled"], 4),
                               remaining=round(shortfall - sell_res["size_filled"], 4))
-                    window_has_unhedged = True
+                window_has_unhedged = True
                 log_order("WINDOW_BLOCKED", reason="emergency_sell_attempted",
                           window=current_epoch)
             elif shortfall > 0:
@@ -1204,6 +1223,11 @@ def main():
         else:
             time.sleep(POLL_SEC)
 
+    # BLOCKER FIX (AI1): ensure threads don't leak on exit
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
     print(f"\n=== DONE. windows={windows_done} ===", flush=True)
 
 
