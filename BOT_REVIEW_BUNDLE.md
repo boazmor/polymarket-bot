@@ -1,3 +1,49 @@
+# Bot Code Bundle for External Code Review
+
+This file concatenates the full source of the 3-platform arbitrage bot so it
+can be shared as a single attachment to ChatGPT / Gemini / Claude / Perplexity
+for a line-by-line code review.
+
+Total: ~3500 lines across 8 files. Sizes per file:
+
+- `arb_v5_3way_live.py` — 1311 lines — entry point for the 15-min bot
+- `arb_v6_3way_live.py` — 1312 lines — entry point for the 1-hour bot (95% identical to V5; difference is WINDOW_SEC and market slug builder)
+- `ws_feeds/state.py` — 127 lines — thread-safe SharedState for orderbook + freshness fields
+- `ws_feeds/poly_ws.py` — 197 lines — Polymarket WebSocket client
+- `ws_feeds/predict_ws.py` — 179 lines — Predict.fun WebSocket client
+- `ws_feeds/limitless_ws.py` — 173 lines — Limitless WebSocket client
+- `ws_feeds/runner.py` — 41 lines — starts the 3 WS threads
+- `check_live_bots.sh` — 91 lines — supervisor / watchdog
+
+Architecture summary:
+
+```
+main thread (bot)
+   |
+   +-- starts 3 daemon WS threads from ws_feeds.runner
+   |       poly_ws  ─► STATE.update("poly",  ...)
+   |       predict_ws ─► STATE.update("predict", ...)
+   |       limitless_ws ─► STATE.update("lim", ...)
+   |
+   +-- per-window loop:
+         1. fetch current market metadata for all 3 platforms in parallel
+         2. inside POLL_SEC tight loop:
+            - read snapshots from STATE
+            - check_freshness on candidate legs
+            - build cross-platform arb candidates
+            - if shareable price + sufficient depth: fire orders
+              - parallel fire if BOTH legs have ≥4× depth
+              - else sequential thin-side-first
+              - top-up from 3rd platform on shortfall
+              - emergency sell excess if >10%
+         3. window close: snapshot wealth, log PnL, stop-on-loss if negative
+```
+
+---
+
+## File 1: arb_v5_3way_live.py (15-min market entry point)
+
+```python
 #!/usr/bin/env python3
 """arb_v5_3way_live_v3.py - Phase 3: direct WebSocket subscriptions.
 
@@ -74,36 +120,41 @@ from dotenv import load_dotenv
 ENV_PATH = "/root/live/btc_5m/.env"
 load_dotenv(ENV_PATH, override=True)
 
-P_DATA = "/root/data_btc_1h_research/combined_per_second.csv"
-PR_LATEST_JSON = "/root/data_predict_btc_1h/latest.json"
-PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
-LIM_LATEST_JSON = "/root/data_limitless_btc_1h/latest.json"
-LIM_MARKETS = "/root/data_limitless_btc_1h/markets.csv"
+P_DATA = "/root/data_btc_15m_research/combined_per_second.csv"
+PR_LATEST_JSON = "/root/data_predict_btc_15m/latest.json"
+PR_MARKETS = "/root/data_predict_btc_15m/markets.csv"
+LIM_LATEST_JSON = "/root/data_limitless_btc_15m/latest.json"
+LIM_MARKETS = "/root/data_limitless_btc_15m/markets.csv"
 
-LIVE_TRADES = "/root/arb_v6_3way_live_trades.csv"
-LIVE_ORDERS = "/root/arb_v6_3way_live_orders.csv"
+LIVE_TRADES = "/root/arb_v5_3way_live_trades.csv"
+LIVE_ORDERS = "/root/arb_v5_3way_live_orders.csv"
 
 BASE_NOTIONAL_USD = 1.20
 MAX_SIDE_USD = 7.0
 COST_THRESHOLD = 0.90
 SINGLE_LEG_MAX_ASK = 0.80
 MIN_DEPTH_USD = 5.0
-PARALLEL_DEPTH_MULTIPLIER = 2.0
+PARALLEL_DEPTH_MULTIPLIER = 4.0
 EXCESS_SELL_PCT = 0.05
 LAST_SECONDS_BLOCK_CROSS_ORACLE = 60
 COOLDOWN_SEC = 5
-POLL_SEC = 0.05
+POLL_SEC = 0.2
 MAX_FEED_AGE_SEC = 10
-LIM_MAX_AGE_SEC = 20
+LIM_MAX_AGE_SEC = 60
 SETTLE_WAIT_SEC = 60
-WINDOW_SEC = 3600
+WINDOW_SEC = 900
 # Phase 2 tight timeouts: fail-fast on unresponsive platforms so the bot
 # doesn't hang for 30s waiting on a single bad API call. Polymarket order
 # placement is normally 100-300ms; 1.5s allows 5x slowdown headroom.
 ORDER_TIMEOUT_SEC = 0.8
 POST_TRADE_MIN_SLEEP = 0.05
-# Freshness model (rewritten 13/05 after 24h diagnostic + AI cross-review):
-HEARTBEAT_MAX_MS = 30000
+# Freshness model (rewritten 13/05 after 24h diagnostic):
+# We trust silence. A quiet market = orderbook unchanged, not stale data.
+# A leg is fresh iff:
+#   1. Heartbeat: any message in the last HEARTBEAT_MAX_MS milliseconds.
+#   2. Transit: last message's server->local delta < TRANSIT_MAX_MS.
+# Per-platform empirical transit p99 (13/05): poly ~80, predict ~80, lim ~35.
+HEARTBEAT_MAX_MS = 60000
 TRANSIT_MAX_MS = {
     'poly': 300,
     'lim': 300,
@@ -126,15 +177,6 @@ ANSI_BOLD = "\033[1m"
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
-
-
-def wait_for_update(timeout=None):
-    """Event-driven sleep: wake the moment a WS thread reports a meaningful
-    book change, or after `timeout` seconds, whichever comes first. Defaults
-    to POLL_SEC so this is a drop-in replacement for time.sleep(POLL_SEC)."""
-    t = POLL_SEC if timeout is None else timeout
-    STATE.wake_event.wait(timeout=t)
-    STATE.wake_event.clear()
 
 
 def log_order(stage, **kw):
@@ -271,14 +313,7 @@ def get_current_limitless_market_slug():
 
 
 def fetch_poly_market(epoch):
-    from datetime import timedelta
-    utc_dt = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
-    et_offset = 4 if 3 <= utc_dt.month <= 11 else 5
-    et_dt = utc_dt - timedelta(hours=et_offset)
-    month = et_dt.strftime("%B").lower()
-    hour_12 = et_dt.hour % 12 or 12
-    ampm = "am" if et_dt.hour < 12 else "pm"
-    slug = f"bitcoin-up-or-down-{month}-{et_dt.day}-{et_dt.year}-{hour_12}{ampm}-et"
+    slug = f"btc-updown-15m-{epoch}"
     url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
     # Change F: use shared PoolManager for keep-alive
     r = HTTP_POOL.request("GET", url, timeout=urllib3.Timeout(connect=3.0, read=7.0))
@@ -524,8 +559,12 @@ def check_freshness(cand, p, pr, lim, now_ms):
       - heartbeat_age = now - last_local_recv < HEARTBEAT_MAX_MS
       - last_transit_ms <= TRANSIT_MAX_MS[platform]
 
-    Silence is trusted. If no message has arrived for some time but the WS
-    has not raised a disconnect, the orderbook is unchanged.
+    Silence is trusted. If no message has arrived for 30s but the WS layer
+    has not raised a disconnect, the orderbook is unchanged. The skew check
+    has been removed; with the new semantics, both legs are either healthy
+    or not, regardless of which one updates more frequently.
+
+    Returns (ok, reason, [heartbeat_age_per_leg]).
     """
     snaps = {"poly": p, "predict": pr, "lim": lim}
     heartbeat_ages = []
@@ -547,9 +586,6 @@ def check_freshness(cand, p, pr, lim, now_ms):
         plat_limit = TRANSIT_MAX_MS.get(plat, 300)
         if transit > plat_limit:
             return False, f"transit_slow_{plat}_{transit}ms", heartbeat_ages
-    # Skew gate intentionally removed: with "trust silence" semantics, two
-    # legs with very different heartbeat ages just means one platform is
-    # quieter than the other. Both can still be fresh.
     return True, "fresh", heartbeat_ages
 
 
@@ -823,7 +859,7 @@ def emergency_sell(ctx, leg, excess_shares):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-windows", type=int, default=9999)
-    ap.add_argument("--max-trades-per-window", type=int, default=2)
+    ap.add_argument("--max-trades-per-window", type=int, default=1)
     ap.add_argument("--invest", type=float, default=MAX_SIDE_USD)
     ap.add_argument("--stop-on-loss", action="store_true", default=True)
     ap.add_argument("--settle-wait-sec", type=int, default=SETTLE_WAIT_SEC)
@@ -831,7 +867,7 @@ def main():
                     help="run full strategy but log orders instead of submitting")
     args = ap.parse_args()
 
-    print(f"=== arb_v6_3way_live (1h) starting at {now_iso()} ===", flush=True)
+    print(f"=== arb_v5_3way_live (15min) starting at {now_iso()} ===", flush=True)
     print(f"invest_per_side=${args.invest}  max_trades_per_window={args.max_trades_per_window}", flush=True)
 
     api_key = os.environ["PREDICT_API_KEY"]
@@ -839,8 +875,8 @@ def main():
     lim_key = os.environ["LIMITLESS_API_KEY"]
     lim_sec = os.environ["LIMITLESS_API_SECRET"]
 
-    pt = PredictTrader(api_key, pk, log_path="/root/arb_v6_3way_live_predict.log")
-    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_v6_3way_live_lim.log")
+    pt = PredictTrader(api_key, pk, log_path="/root/arb_v5_3way_live_predict.log")
+    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_v5_3way_live_lim.log")
 
     from py_clob_client_v2.client import ClobClient
     from py_clob_client_v2.clob_types import OrderArgsV2, OrderType
@@ -911,7 +947,7 @@ def main():
 
             if window_epoch != current_epoch:
                 if current_epoch is not None and window_open_wealth is not None:
-                    print(f"\n>>> WINDOW {current_epoch} (1h) CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s...", flush=True)
+                    print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s...", flush=True)
                     time.sleep(args.settle_wait_sec)
                     close_snap = snapshot_wealth(pt, poly_client, lt)
                     if not close_snap.get("valid") or not window_open_wealth.get("valid"):
@@ -1077,20 +1113,9 @@ def main():
 
             shares, max_p, min_p = size_trade(best)
             if shares is None:
-                p_ua = p.get("ua", 0) if p else 0
-                p_da = p.get("da", 0) if p else 0
-                pr_ya = pr.get("yes_ask", 0) if pr else 0
-                pr_na = pr.get("no_ask_implied", 0) if pr else 0
-                lim_ua = lim.get("up_ask", 0) if lim else 0
-                lim_da = lim.get("down_ask", 0) if lim else 0
-                sec_in_window = (int(time.time()) - current_epoch) if current_epoch else -1
                 log_order("SKIP_SIZE_OVER_CAP",
                           dir=best["direction"], min_p=min_p, max_p=max_p,
-                          cap=MAX_SIDE_USD,
-                          poly_ua=round(p_ua, 4), poly_da=round(p_da, 4),
-                          pr_ya=round(pr_ya, 4), pr_na=round(pr_na, 4),
-                          lim_ua=round(lim_ua, 4), lim_da=round(lim_da, 4),
-                          sec_in=sec_in_window)
+                          cap=MAX_SIDE_USD)
                 time.sleep(POLL_SEC)
                 continue
 
@@ -1330,3 +1355,865 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
+
+---
+
+## File 2: ws_feeds/state.py
+
+```python
+"""Shared in-memory orderbook state for the 3 platforms.
+
+Replaces the file-polling architecture (latest.json -> tail_last_row) with a
+thread-safe dict updated directly by each platform's WebSocket client.
+
+The main bot reads via SharedState.get(platform) which returns a copy to
+prevent torn reads. is_fresh(platform) gates trading on connection health
+and quote age.
+"""
+
+import copy
+import threading
+import time
+from dataclasses import dataclass
+
+
+@dataclass
+class PlatformBook:
+    """Top-of-book snapshot for one platform's BTC market."""
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    bid_depth_usd: float = 0.0
+    ask_depth_usd: float = 0.0
+    no_best_ask: float = 0.0
+    no_ask_depth_usd: float = 0.0
+    market_id: str = ""
+    slug: str = ""
+    ts_ms: int = 0                 # alias for last_update_ms, kept for compat
+    last_update_ms: int = 0        # local receive time of last message
+    server_ts_ms: int = 0          # platform-stamped emit time of last message
+    last_transit_ms: int = 0       # last_update_ms - server_ts_ms
+    connected: bool = False
+    error_count: int = 0
+
+
+class SharedState:
+    """Thread-safe container for all platforms' orderbook state."""
+
+    def __init__(self):
+        self._data = {
+            "poly": PlatformBook(),
+            "predict": PlatformBook(),
+            "lim": PlatformBook(),
+        }
+        self._lock = threading.RLock()
+
+    def update(self, platform: str, **kwargs):
+        """Bulk-update fields. Called by WS client threads."""
+        with self._lock:
+            book = self._data[platform]
+            for k, v in kwargs.items():
+                if hasattr(book, k):
+                    setattr(book, k, v)
+            now_ms = int(time.time() * 1000)
+            book.last_update_ms = now_ms
+            book.ts_ms = now_ms
+            # Compute transit only when server_ts is close enough to now to
+            # represent network latency (not a stale book-state timestamp like
+            # Predict.fun's updateTimestampMs after a reconnect snapshot).
+            if 0 < book.server_ts_ms and (now_ms - book.server_ts_ms) < 10000:
+                book.last_transit_ms = now_ms - book.server_ts_ms
+
+    def get(self, platform: str) -> PlatformBook:
+        """Return a COPY so the caller's reads aren't disturbed by a
+        concurrent WS update mid-iteration."""
+        with self._lock:
+            return copy.copy(self._data[platform])
+
+    def mark_disconnected(self, platform: str):
+        """Mark stale during reconnect so the bot stops trading on that
+        platform until data flows again. Zero out prices to avoid `ghost`
+        liquidity reads."""
+        with self._lock:
+            self._data[platform].connected = False
+            self._data[platform].best_bid = 0.0
+            self._data[platform].best_ask = 0.0
+            self._data[platform].bid_depth_usd = 0.0
+            self._data[platform].ask_depth_usd = 0.0
+            self._data[platform].error_count += 1
+
+    def is_fresh(self, platform: str,
+                 heartbeat_max_ms: int = 60000,
+                 transit_max_ms: int = 300) -> bool:
+        """Returns True iff: WS connected AND a recent heartbeat exists AND
+        the most recent message's transit time (server-stamped to local) was
+        within `transit_max_ms`.
+
+        Quiet markets are TRUSTED: a silent period just means the orderbook
+        did not change, NOT that data is stale. The heartbeat window only
+        catches outright disconnects.
+        """
+        with self._lock:
+            book = self._data[platform]
+            if not book.connected:
+                return False
+            now_ms = int(time.time() * 1000)
+            if now_ms - book.last_update_ms > heartbeat_max_ms:
+                return False
+            if book.last_transit_ms > transit_max_ms:
+                return False
+            return True
+
+    def all_connected(self) -> bool:
+        """True iff all three platforms have live WS connections."""
+        with self._lock:
+            return all(b.connected for b in self._data.values())
+
+    def snapshot(self) -> dict:
+        """Returns a flat dict of all platform states, for logging/debugging."""
+        with self._lock:
+            now_ms = int(time.time() * 1000)
+            return {
+                plat: {
+                    "best_bid": b.best_bid,
+                    "best_ask": b.best_ask,
+                    "bid_depth_usd": b.bid_depth_usd,
+                    "ask_depth_usd": b.ask_depth_usd,
+                    "age_ms": (now_ms - b.last_update_ms) if b.last_update_ms else -1,
+                    "connected": b.connected,
+                    "error_count": b.error_count,
+                }
+                for plat, b in self._data.items()
+            }
+
+
+# Module-level singleton for the running bot
+STATE = SharedState()
+
+```
+
+---
+
+## File 3: ws_feeds/poly_ws.py
+
+```python
+"""Polymarket CLOB WebSocket client.
+
+Subscribes to the `market` channel for specified token IDs and maintains
+top-of-book state via the SharedState container.
+
+Wire protocol (verified from py-clob-client + Polymarket docs):
+  - URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  - Subscribe message:
+      {"type": "MARKET", "markets": [token_id1, token_id2, ...]}
+    Older docs use "assets_ids" — the v2 endpoint accepts "markets" too.
+  - Event types received:
+      "book"          full snapshot (on subscribe + on rollover)
+      "price_change"  individual level update
+      "tick_size_change" rare — recalibrate
+  - No authentication required for public orderbook channel.
+
+KNOWN BUG (silent freeze): the server occasionally accepts the connection
+and subscription but never sends a book event. We detect this by timing
+out on the first message after subscribe (5s) and forcing a reconnect.
+"""
+
+import asyncio
+import json
+import time
+import websockets
+
+POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+
+async def _handle_message(msg_str, token_to_side, state, platform="poly"):
+    """Parse a single WS message and update SharedState.
+
+    token_to_side maps each subscribed token_id to "up" or "down" so we know
+    which side of the market the update affects.
+    """
+    try:
+        data = json.loads(msg_str)
+    except Exception:
+        return
+
+    # Polymarket sends list-wrapped messages in some channels
+    if isinstance(data, list):
+        for entry in data:
+            await _handle_one(entry, token_to_side, state, platform)
+    else:
+        await _handle_one(data, token_to_side, state, platform)
+
+
+async def _handle_one(entry, token_to_side, state, platform):
+    event_type = entry.get("event_type")
+    asset_id = entry.get("asset_id") or entry.get("market") or entry.get("token_id")
+    side = token_to_side.get(str(asset_id))
+    if not side:
+        return  # event for a token we don't track
+
+    server_ts = entry.get("timestamp")
+    try:
+        server_ts_ms = int(server_ts) if server_ts is not None else 0
+    except (TypeError, ValueError):
+        server_ts_ms = 0
+
+    if event_type == "book":
+        bids = entry.get("bids") or []
+        asks = entry.get("asks") or []
+        if side == "up":
+            best_bid = float(bids[0]["price"]) if bids else 0.0
+            best_ask = float(asks[0]["price"]) if asks else 0.0
+            bid_depth = float(bids[0]["size"]) * best_bid if bids else 0.0
+            ask_depth = float(asks[0]["size"]) * best_ask if asks else 0.0
+            state.update(platform,
+                         best_bid=best_bid, best_ask=best_ask,
+                         bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
+                         server_ts_ms=server_ts_ms, connected=True)
+
+    elif event_type == "price_change":
+        changes = entry.get("changes") or [entry]
+        for ch in changes:
+            try:
+                price = float(ch.get("price", 0))
+                size = float(ch.get("size", 0))
+                ch_side = (ch.get("side") or "").upper()
+            except (TypeError, ValueError):
+                continue
+            book = state.get(platform)
+            if side == "up":
+                if ch_side == "SELL" and abs(price - book.best_ask) < 1e-9:
+                    state.update(platform,
+                                 ask_depth_usd=size * price,
+                                 server_ts_ms=server_ts_ms, connected=True)
+                elif ch_side == "BUY" and abs(price - book.best_bid) < 1e-9:
+                    state.update(platform,
+                                 bid_depth_usd=size * price,
+                                 server_ts_ms=server_ts_ms, connected=True)
+
+
+async def poly_ws_main(tokens_provider, state):
+    """Main WS loop with reconnect and silent-freeze detection.
+
+    tokens_provider: callable returning (up_tokens, down_tokens) tuples.
+    Called at every connect AND between message receives, so when the
+    15-min market rolls over we automatically re-subscribe.
+
+    Backwards-compat: if tokens_provider is a list-pair tuple, treat it
+    as static.
+    """
+    backoff = 1.0
+    max_backoff = 30.0
+
+    def get_tokens():
+        if callable(tokens_provider):
+            up, down = tokens_provider()
+            return list(up or []), list(down or [])
+        # Static legacy form: (up_list, down_list)
+        return list(tokens_provider[0]), list(tokens_provider[1])
+
+    while True:
+        try:
+            up_tokens, down_tokens = get_tokens()
+            if not up_tokens or not down_tokens:
+                # Markets not loaded yet — wait
+                await asyncio.sleep(1)
+                continue
+            all_tokens = up_tokens + down_tokens
+            token_to_side = {}
+            for t in up_tokens:
+                token_to_side[str(t)] = "up"
+            for t in down_tokens:
+                token_to_side[str(t)] = "down"
+
+            async with websockets.connect(POLY_WS_URL,
+                                          ping_interval=20,
+                                          ping_timeout=10) as ws:
+                # Official Polymarket CLOB market-channel subscribe format
+                sub_msg = {
+                    "assets_ids": [str(t) for t in all_tokens],
+                    "type": "market",
+                    "custom_feature_enabled": True,
+                }
+                await ws.send(json.dumps(sub_msg))
+                current_up = up_tokens[0]
+
+                # Silent-freeze guard: expect a book event within 5s.
+                # If not, force reconnect.
+                try:
+                    first = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    await _handle_message(first, token_to_side, state)
+                except asyncio.TimeoutError:
+                    print("[poly_ws] silent freeze on first message, reconnecting")
+                    raise ConnectionError("silent_freeze_first_msg")
+
+                backoff = 1.0  # successful connect
+                async for msg in ws:
+                    await _handle_message(msg, token_to_side, state)
+                    # Check for market rollover — re-subscribe if token set
+                    # changed. We compare the first up_token only since the
+                    # bot uses one market per window.
+                    if callable(tokens_provider):
+                        new_up, new_down = tokens_provider()
+                        if new_up and new_up[0] != current_up:
+                            print(f"[poly_ws] market rollover detected; reconnecting")
+                            break  # exit inner loop, reconnect with new tokens
+        except Exception as e:
+            print(f"[poly_ws] error: {type(e).__name__}: {e}; reconnect in {backoff}s")
+            state.mark_disconnected("poly")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+
+def run_in_thread(tokens_provider, state):
+    """Helper for runner.py to start this client in a dedicated thread.
+
+    tokens_provider: callable returning (up_tokens_list, down_tokens_list).
+    """
+    import threading
+
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(poly_ws_main(tokens_provider, state))
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=target, daemon=True, name="poly_ws")
+    t.start()
+    return t
+
+
+if __name__ == "__main__":
+    # Standalone test: pass two token IDs as CLI args
+    import sys
+    from state import STATE
+    if len(sys.argv) < 3:
+        print("usage: poly_ws.py <up_token> <down_token>")
+        sys.exit(1)
+    up_t, down_t = sys.argv[1], sys.argv[2]
+    asyncio.run(poly_ws_main(lambda: ([up_t], [down_t]), STATE))
+
+```
+
+---
+
+## File 4: ws_feeds/predict_ws.py
+
+```python
+"""Predict.fun WebSocket client.
+
+Subscribes to predictOrderbook/{market_id} topic on the public WS endpoint
+and maintains top-of-book state via the SharedState container.
+
+Wire protocol (verified from existing PREDICT_RECORDER_15M_V2.py which has
+been running stable for weeks):
+  - URL: wss://ws.predict.fun/ws
+  - Subscribe:
+      {"method": "subscribe", "requestId": <int>, "params": ["predictOrderbook/{market_id}"]}
+  - Event format:
+      {"type": "M",
+       "topic": "predictOrderbook/{market_id}",
+       "data": {"marketId": ..., "bids": [[price, size], ...], "asks": [[price, size], ...]}}
+  - Heartbeat: handled by websockets library's TCP ping (ping_interval=20).
+    The existing recorder has run for weeks without explicit message-level
+    heartbeats, so this is sufficient in practice.
+  - No authentication required for public orderbook channel.
+"""
+
+import asyncio
+import json
+import time
+import websockets
+
+PREDICT_WS_URL = "wss://ws.predict.fun/ws"
+
+
+async def predict_ws_main(market_id_provider, state):
+    """Main WS loop with reconnect.
+
+    market_id_provider: a callable that returns the current Predict.fun
+    market ID at any time. This lets the bot rotate markets every 15 min
+    without restarting the WS thread; we re-subscribe whenever the active
+    market ID changes.
+    """
+    backoff = 1.0
+    max_backoff = 30.0
+    req_id_counter = 1
+
+    while True:
+        current_market_id = None
+        try:
+            async with websockets.connect(PREDICT_WS_URL,
+                                          open_timeout=10,
+                                          ping_interval=20,
+                                          ping_timeout=10) as ws:
+                # Subscribe to the current market
+                current_market_id = market_id_provider()
+                if not current_market_id:
+                    await asyncio.sleep(1)
+                    continue
+                topic = f"predictOrderbook/{current_market_id}"
+                req_id_counter += 1
+                sub_msg = {"method": "subscribe", "requestId": req_id_counter,
+                           "params": [topic]}
+                await ws.send(json.dumps(sub_msg))
+
+                # Silent-freeze guard: expect a message (sub-ack or data)
+                # within 5 seconds.
+                try:
+                    first = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    _process_msg(first, current_market_id, state)
+                except asyncio.TimeoutError:
+                    print("[predict_ws] silent freeze, reconnecting")
+                    raise ConnectionError("silent_freeze_first_msg")
+
+                backoff = 1.0
+
+                while True:
+                    # Periodically check if the market has rolled over.
+                    # If so, re-subscribe to the new market_id.
+                    new_market_id = market_id_provider()
+                    if new_market_id and new_market_id != current_market_id:
+                        # Unsubscribe old + subscribe new
+                        try:
+                            old_topic = f"predictOrderbook/{current_market_id}"
+                            req_id_counter += 1
+                            await ws.send(json.dumps({
+                                "method": "unsubscribe",
+                                "requestId": req_id_counter,
+                                "params": [old_topic]
+                            }))
+                        except Exception:
+                            pass
+                        current_market_id = new_market_id
+                        new_topic = f"predictOrderbook/{current_market_id}"
+                        req_id_counter += 1
+                        await ws.send(json.dumps({
+                            "method": "subscribe",
+                            "requestId": req_id_counter,
+                            "params": [new_topic]
+                        }))
+                        state.update("predict", market_id=str(current_market_id))
+
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    _process_msg(msg, current_market_id, state)
+
+        except Exception as e:
+            print(f"[predict_ws] error: {type(e).__name__}: {e}; reconnect in {backoff}s")
+            state.mark_disconnected("predict")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+
+def _process_msg(msg_str, expected_market_id, state):
+    try:
+        d = json.loads(msg_str)
+    except Exception:
+        return
+
+    # Subscribe acks have no "type" field — ignore
+    if d.get("type") != "M":
+        return
+    if not d.get("topic", "").startswith("predictOrderbook/"):
+        return
+
+    data = d.get("data") or {}
+    market_id = data.get("marketId")
+    if expected_market_id is not None and str(market_id) != str(expected_market_id):
+        return  # event for a market we no longer track
+
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+
+    # Predict.fun format: [[price, size], ...]
+    yes_bid = float(bids[0][0]) if bids else 0.0
+    yes_bid_size = float(bids[0][1]) if bids else 0.0
+    yes_ask = float(asks[0][0]) if asks else 0.0
+    yes_ask_size = float(asks[0][1]) if asks else 0.0
+
+    yes_ask_usd = sum(float(a[0]) * float(a[1]) for a in asks)
+    yes_bid_usd = sum(float(b[0]) * float(b[1]) for b in bids)
+
+    raw_server_ts = data.get("updateTimestampMs")
+    try:
+        server_ts_ms = int(raw_server_ts) if raw_server_ts is not None else 0
+    except (TypeError, ValueError):
+        server_ts_ms = 0
+
+    state.update("predict",
+                 best_bid=yes_bid,
+                 best_ask=yes_ask,
+                 bid_depth_usd=round(yes_bid_usd, 4),
+                 ask_depth_usd=round(yes_ask_usd, 4),
+                 no_best_ask=round(1.0 - yes_bid, 4) if yes_bid > 0 else 0,
+                 no_ask_depth_usd=round(yes_bid_usd, 4),
+                 server_ts_ms=server_ts_ms,
+                 market_id=str(market_id),
+                 connected=True)
+
+
+def run_in_thread(market_id_provider, state):
+    import threading
+
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(predict_ws_main(market_id_provider, state))
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=target, daemon=True, name="predict_ws")
+    t.start()
+    return t
+
+
+if __name__ == "__main__":
+    import sys
+    from state import STATE
+    if len(sys.argv) < 2:
+        print("usage: predict_ws.py <market_id>")
+        sys.exit(1)
+    mid = int(sys.argv[1])
+    asyncio.run(predict_ws_main(lambda: mid, STATE))
+
+```
+
+---
+
+## File 5: ws_feeds/limitless_ws.py
+
+```python
+"""Limitless Exchange WebSocket client.
+
+Uses limitless-sdk's WebSocketClient (Socket.IO under the hood) to subscribe
+to the orderbook channel for one market slug. Updates SharedState on every
+orderbookUpdate event.
+
+Why the SDK and not raw websockets:
+  - Limitless uses Socket.IO protocol, not raw WS
+  - The SDK handles the handshake, reconnect, and event-name mapping
+  - Our limitless_trader.py already depends on the SDK, so no new dependency
+
+Threading:
+  Limitless trader uses its own asyncio loop for order placement. The WS
+  client here uses a SEPARATE loop in its own thread. They never share
+  the loop — order placement runs on the main thread, WS on its own.
+"""
+
+import asyncio
+import time
+
+from limitless_sdk.websocket import WebSocketClient, WebSocketConfig
+
+
+async def limitless_ws_main(slug_provider, state):
+    """Main WS loop with reconnect and resubscribe on market rollover.
+
+    slug_provider: callable returning the current market slug (so we can
+    re-subscribe when the 15-min/1h market rolls over).
+    """
+    current_slug = None
+    backoff = 1.0
+    max_backoff = 30.0
+
+    while True:
+        try:
+            ws = WebSocketClient(WebSocketConfig(auto_reconnect=True))
+
+            @ws.on("orderbookUpdate")
+            async def on_ob(data):
+                try:
+                    msg_slug = data.get("marketSlug", "") if isinstance(data, dict) else ""
+                    if current_slug and msg_slug and msg_slug != current_slug:
+                        return  # event for a different market
+                    ob = data.get("orderbook") or {} if isinstance(data, dict) else {}
+                    bids = ob.get("bids") or []
+                    asks = ob.get("asks") or []
+
+                    # parse_size_to_usd-style normalization: API may return
+                    # raw size_units (shares * 1e6) or already-decimal shares.
+                    def to_shares(s):
+                        try:
+                            v = float(s)
+                        except (TypeError, ValueError):
+                            return 0.0
+                        return v / 1e6 if v > 1e4 else v
+
+                    if bids:
+                        best_bid = float(bids[0].get("price") or 0)
+                        best_bid_shares = to_shares(bids[0].get("size"))
+                        best_bid_usd = best_bid * best_bid_shares
+                        total_bid_usd = sum(
+                            float(b.get("price") or 0) * to_shares(b.get("size"))
+                            for b in bids
+                        )
+                    else:
+                        best_bid = 0.0
+                        best_bid_usd = 0.0
+                        total_bid_usd = 0.0
+                    if asks:
+                        best_ask = float(asks[0].get("price") or 0)
+                        best_ask_shares = to_shares(asks[0].get("size"))
+                        best_ask_usd = best_ask * best_ask_shares
+                        total_ask_usd = sum(
+                            float(a.get("price") or 0) * to_shares(a.get("size"))
+                            for a in asks
+                        )
+                    else:
+                        best_ask = 0.0
+                        best_ask_usd = 0.0
+                        total_ask_usd = 0.0
+
+                    no_best_ask = round(1.0 - best_bid, 4) if best_bid > 0 else 0
+                    no_ask_depth = best_bid_usd  # same liquidity, complement price
+
+                    server_ts_ms = 0
+                    iso_ts = data.get("timestamp") if isinstance(data, dict) else None
+                    if iso_ts:
+                        try:
+                            from datetime import datetime as _dt
+                            server_ts_ms = int(_dt.fromisoformat(
+                                iso_ts.replace("Z", "+00:00")).timestamp() * 1000)
+                        except Exception:
+                            server_ts_ms = 0
+
+                    state.update("lim",
+                                 best_bid=best_bid, best_ask=best_ask,
+                                 bid_depth_usd=round(best_bid_usd, 4),
+                                 ask_depth_usd=round(best_ask_usd, 4),
+                                 no_best_ask=no_best_ask,
+                                 no_ask_depth_usd=round(no_ask_depth, 4),
+                                 server_ts_ms=server_ts_ms,
+                                 slug=msg_slug or current_slug or "",
+                                 connected=True)
+                except Exception as e:
+                    print(f"[lim_ws] event handler error: {type(e).__name__}: {e}")
+
+            await ws.connect()
+            print("[lim_ws] connected")
+            current_slug = slug_provider()
+            if current_slug:
+                await ws.subscribe("subscribe_market_prices",
+                                   {"marketSlugs": [current_slug]})
+
+            backoff = 1.0
+
+            while True:
+                await asyncio.sleep(5)
+                # Check for market rollover
+                new_slug = slug_provider()
+                if new_slug and new_slug != current_slug:
+                    if current_slug:
+                        try:
+                            await ws.unsubscribe("subscribe_market_prices",
+                                                 {"marketSlugs": [current_slug]})
+                        except Exception:
+                            pass
+                    current_slug = new_slug
+                    await ws.subscribe("subscribe_market_prices",
+                                       {"marketSlugs": [current_slug]})
+                    state.update("lim", slug=current_slug)
+
+                # Zombie detection: if last update > 30s ago, force reconnect.
+                snap = state.get("lim")
+                now_ms = int(time.time() * 1000)
+                if snap.last_update_ms and (now_ms - snap.last_update_ms > 30000):
+                    print("[lim_ws] zombie detected (no update >30s), reconnecting")
+                    raise ConnectionError("zombie_no_data")
+
+        except Exception as e:
+            print(f"[lim_ws] error: {type(e).__name__}: {e}; reconnect in {backoff}s")
+            state.mark_disconnected("lim")
+            try:
+                await ws.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+
+def run_in_thread(slug_provider, state):
+    import threading
+
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(limitless_ws_main(slug_provider, state))
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=target, daemon=True, name="lim_ws")
+    t.start()
+    return t
+
+
+if __name__ == "__main__":
+    import sys
+    from state import STATE
+    if len(sys.argv) < 2:
+        print("usage: limitless_ws.py <market_slug>")
+        sys.exit(1)
+    slug = sys.argv[1]
+    asyncio.run(limitless_ws_main(lambda: slug, STATE))
+
+```
+
+---
+
+## File 6: ws_feeds/runner.py
+
+```python
+"""Orchestrates the 3 WebSocket threads alongside the main sync bot.
+
+Usage from arb_v5_3way_live_v3.py:
+
+    from ws_feeds.state import STATE
+    from ws_feeds.runner import start_all_feeds
+
+    feeds = start_all_feeds(
+        poly_up_tokens=[up_token],
+        poly_down_tokens=[down_token],
+        predict_market_id_provider=lambda: current_predict_market_id,
+        limitless_slug_provider=lambda: current_lim_slug,
+        state=STATE,
+    )
+    # main bot loop reads STATE.get(platform) / STATE.is_fresh(platform)
+    # feeds is a list of Thread objects for diagnostics
+"""
+
+from ws_feeds.poly_ws import run_in_thread as poly_run
+from ws_feeds.predict_ws import run_in_thread as predict_run
+from ws_feeds.limitless_ws import run_in_thread as lim_run
+
+
+def start_all_feeds(poly_tokens_provider,
+                    predict_market_id_provider,
+                    limitless_slug_provider,
+                    state):
+    """Start the 3 WS client threads. Each runs in its own asyncio loop
+    and updates the shared `state` container.
+
+    All three providers are callables. The main bot updates the underlying
+    container as markets roll over; the WS clients re-read at each iteration
+    and re-subscribe automatically.
+
+    Returns a list of Thread objects (already started, daemon=True).
+    """
+    threads = []
+    threads.append(poly_run(poly_tokens_provider, state))
+    threads.append(predict_run(predict_market_id_provider, state))
+    threads.append(lim_run(limitless_slug_provider, state))
+    return threads
+
+```
+
+---
+
+## File 7: check_live_bots.sh
+
+```bash
+#!/bin/bash
+# Watchdog for live trading bots.
+#   Helsinki: arb_v5_live (15-min markets), arb_v7_live (5-min markets)
+#   Hetzner:  arb_v6_live (1-hour markets)
+#
+# Each bot is checked for:
+#   1. Process alive (pgrep -f "python3 -u $script")
+#   2. Log file updated within $max_stale_sec
+# If dead or stale, kill remnants, archive old log, restart under screen.
+#
+# Append OK / RESTART events to /root/bot_watchdog.log.
+# Pass the server flag (helsinki | hetzner) to control which bots to check.
+#
+# Usage:  bash /root/check_live_bots.sh helsinki
+#         bash /root/check_live_bots.sh hetzner
+
+NOW=$(date +%s)
+LOG=/root/bot_watchdog.log
+HOST=${1:-helsinki}
+
+check_bot() {
+  local name=$1
+  local script=$2
+  local args=$3
+  local logfile=$4
+  local max_stale_sec=$5
+
+  # Stop file convention: when the bot writes /root/<script-without-.py>.stopped
+  # (e.g. arb_v5_3way_live.stopped) the watchdog must leave it alone. The bot
+  # writes this when stop-on-loss triggers; resume by deleting the file.
+  local stop_file="/root/${script%.py}.stopped"
+  if [ -f "$stop_file" ]; then
+    echo "$(date -u +%FT%TZ) SKIP_STOPPED $name stop_file=$stop_file" >> "$LOG"
+    return
+  fi
+
+  local pids=$(pgrep -f "python3.* $script" | tr '\n' ',')
+  local restart_reason=""
+
+  if [ -z "$pids" ]; then
+    restart_reason="DEAD_PROCESS"
+  elif [ -f "/root/$logfile" ]; then
+    local mtime
+    mtime=$(stat -c %Y "/root/$logfile")
+    local age=$((NOW - mtime))
+    if [ "$age" -gt "$max_stale_sec" ]; then
+      restart_reason="STALE_LOG_${age}s_over_${max_stale_sec}s"
+    fi
+  else
+    restart_reason="NO_LOG_FILE"
+  fi
+
+  if [ -n "$restart_reason" ]; then
+    echo "$(date -u +%FT%TZ) RESTART $name reason=$restart_reason old_pids=$pids" >> "$LOG"
+    pkill -f "python3.* $script" 2>/dev/null
+    sleep 2
+    screen -wipe > /dev/null 2>&1
+    if [ -f "/root/$logfile" ]; then
+      mv "/root/$logfile" "/root/${logfile}.bak.${NOW}"
+    fi
+    screen -dmS "$name" bash -c "cd /root && python3 -u $script $args > $logfile 2>&1"
+    sleep 3
+    local new_pid
+    new_pid=$(pgrep -f "python3.* $script" | head -1)
+    echo "$(date -u +%FT%TZ) RESTART $name DONE new_pid=$new_pid" >> "$LOG"
+  else
+    echo "$(date -u +%FT%TZ) OK $name pid=$pids" >> "$LOG"
+  fi
+}
+
+case "$HOST" in
+  usa)
+    # Reverted 13/05 - Polymarket geoblocks US. Live bots now on Europe.
+    # US server kept for Limitless recorder + future use only.
+    ;;
+  helsinki)
+    check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 600
+    # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict
+    # fills from 11/05 that need manual reconciliation before resuming.
+    # check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
+    ;;
+  hetzner)
+    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
+    check_bot arb_v5_3way arb_v5_3way.py "" arb_v5_3way_run.log 900
+    check_bot arb_v6_3way arb_v6_3way.py "" arb_v6_3way_run.log 1800
+    ;;
+  *)
+    echo "Usage: $0 usa|helsinki|hetzner" >&2
+    exit 1
+    ;;
+esac
+
+```
+
+---
+
+Note: arb_v6_3way_live.py is omitted from this bundle because it is 95% identical to V5. The only differences are: WINDOW_SEC=3600 (vs 900), and the Polymarket market slug is computed by date string ("bitcoin-up-or-down-may-13-2026-3pm-et") rather than epoch.

@@ -40,8 +40,35 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 API_BASE = "https://api.gemini.com"
+POLY_COMBINED_PATH = "/root/data_btc_15m_research/combined_per_second.csv"
 POLL_INTERVAL_SEC = 1.0
 HTTP_TIMEOUT = 5
+
+
+def lookup_binance_now():
+    # Read latest Binance price from Polymarket recorder's combined CSV.
+    try:
+        if not os.path.exists(POLY_COMBINED_PATH):
+            return None
+        with open(POLY_COMBINED_PATH, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            seek_back = min(size, 4096)
+            f.seek(size - seek_back)
+            tail = f.read().decode("utf-8", errors="ignore")
+        for line in reversed([ln for ln in tail.strip().split("\n") if ln]):
+            cols = line.split(",")
+            if len(cols) < 6:
+                continue
+            try:
+                price = float(cols[5])
+            except Exception:
+                continue
+            if price > 0:
+                return price
+        return None
+    except Exception:
+        return None
 
 COIN: str = "BTC"
 WINDOW: str = "15m"
@@ -88,10 +115,12 @@ class CsvStore:
             "combined": os.path.join(self.data_dir, "combined_per_second.csv"),
             "markets":  os.path.join(self.data_dir, "markets.csv"),
             "events":   os.path.join(self.data_dir, "events.csv"),
+            "outcomes": os.path.join(self.data_dir, "market_outcomes.csv"),
         }
         self._init_if_missing(self.paths["combined"], [
             "local_ts", "epoch_sec", "sec_from_open",
             "ticker", "instrument_symbol", "strike",
+            "binance_now", "distance_signed", "distance_abs",
             "yes_bid", "yes_ask",
             "yes_bid_size", "yes_ask_size",
             "yes_bid_usd", "yes_ask_usd",
@@ -108,6 +137,10 @@ class CsvStore:
             "open_time", "close_time", "title",
         ])
         self._init_if_missing(self.paths["events"], ["local_ts", "event", "detail"])
+        self._init_if_missing(self.paths["outcomes"], [
+            "local_ts", "ticker", "instrument_symbol", "strike",
+            "settlement_price", "winner_side", "next_ticker", "source",
+        ])
         self.event("RECORDER_RESUME", f"COIN={COIN} SERIES={SERIES}")
 
     @staticmethod
@@ -188,6 +221,7 @@ def main_loop(csvs: CsvStore):
     current_ticker: Optional[str] = None
     current_open_epoch: Optional[int] = None
     current_symbol: Optional[str] = None
+    current_strike: Optional[float] = None
     no_market_logged = False
 
     csvs.event("START", f"COIN={COIN} SERIES={SERIES} POLL={POLL_INTERVAL_SEC}s")
@@ -228,8 +262,22 @@ def main_loop(csvs: CsvStore):
                 open_iso, close_iso, ev.get("title", ""),
             ])
             csvs.event("MARKET_ROLLOVER", f"{current_ticker} -> {ticker}")
+            # Outcome: previous market's settlement price = new market's strike.
+            if current_ticker and current_strike is not None and strike_f is not None:
+                if strike_f > current_strike:
+                    winner = "YES"
+                elif strike_f < current_strike:
+                    winner = "NO"
+                else:
+                    winner = "TIE"
+                csvs.append("outcomes", [
+                    now_local(), current_ticker, current_symbol or "",
+                    f"{current_strike}", f"{strike_f}",
+                    winner, ticker, "rollover/strike-compare",
+                ])
             current_ticker = ticker
             current_symbol = instrument
+            current_strike = strike_f
             current_open_epoch = parse_iso_to_epoch(open_iso)
 
         sec_from_open = None
@@ -263,9 +311,20 @@ def main_loop(csvs: CsvStore):
         close_iso = ev.get("expiryDate")
         open_iso = ev.get("startTime") or c.get("effectiveDate")
 
+        binance_now = lookup_binance_now()
+        try:
+            strike_for_dist = float(strike_value or 0)
+        except Exception:
+            strike_for_dist = 0.0
+        distance_signed = (binance_now - strike_for_dist) if (binance_now is not None and strike_for_dist > 0) else None
+        distance_abs = abs(distance_signed) if distance_signed is not None else None
+
         csvs.append("combined", [
             now_local(), now_epoch_s(), sec_from_open,
             ticker, instrument, strike_value,
+            f"{binance_now:.4f}" if binance_now is not None else "",
+            f"{distance_signed:.4f}" if distance_signed is not None else "",
+            f"{distance_abs:.4f}" if distance_abs is not None else "",
             f"{bid_p:.4f}" if bid_p is not None else "",
             f"{ask_p:.4f}" if ask_p is not None else "",
             f"{bid_sz:.4f}" if bid_sz is not None else "",

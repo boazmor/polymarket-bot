@@ -135,7 +135,12 @@ def _process_msg(msg_str, expected_market_id, state):
     yes_ask_usd = sum(float(a[0]) * float(a[1]) for a in asks)
     yes_bid_usd = sum(float(b[0]) * float(b[1]) for b in bids)
 
-    now_ms = int(time.time() * 1000)
+    raw_server_ts = data.get("updateTimestampMs")
+    try:
+        server_ts_ms = int(raw_server_ts) if raw_server_ts is not None else 0
+    except (TypeError, ValueError):
+        server_ts_ms = 0
+
     state.update("predict",
                  best_bid=yes_bid,
                  best_ask=yes_ask,
@@ -143,7 +148,7 @@ def _process_msg(msg_str, expected_market_id, state):
                  ask_depth_usd=round(yes_ask_usd, 4),
                  no_best_ask=round(1.0 - yes_bid, 4) if yes_bid > 0 else 0,
                  no_ask_depth_usd=round(yes_bid_usd, 4),
-                 ts_ms=now_ms,
+                 server_ts_ms=server_ts_ms,
                  market_id=str(market_id),
                  connected=True)
 

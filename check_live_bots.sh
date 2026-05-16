@@ -25,6 +25,15 @@ check_bot() {
   local logfile=$4
   local max_stale_sec=$5
 
+  # Stop file convention: when the bot writes /root/<script-without-.py>.stopped
+  # (e.g. arb_v5_3way_live.stopped) the watchdog must leave it alone. The bot
+  # writes this when stop-on-loss triggers; resume by deleting the file.
+  local stop_file="/root/${script%.py}.stopped"
+  if [ -f "$stop_file" ]; then
+    echo "$(date -u +%FT%TZ) SKIP_STOPPED $name stop_file=$stop_file" >> "$LOG"
+    return
+  fi
+
   local pids=$(pgrep -f "python3.* $script" | tr '\n' ',')
   local restart_reason=""
 
@@ -61,15 +70,19 @@ check_bot() {
 
 case "$HOST" in
   usa)
-    check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 600
-    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
-    check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
+    # Reverted 13/05 - Polymarket geoblocks US. Live bots now on Europe.
+    # US server kept for Limitless recorder + future use only.
     ;;
   helsinki)
-    # Live bots migrated to US server 12/05. Helsinki keeps recorders only.
+    # 15-min bot: log must update within 180s (3 min) - tighter than the
+    # default 600s since a hung 15-min bot loses an entire window quickly.
+    check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 180
+    # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict
+    # fills from 11/05 that need manual reconciliation before resuming.
+    # check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
     ;;
   hetzner)
-    # Live bots migrated to US server 12/05. Hetzner keeps virtual 3WAY bots and recorders.
+    check_bot arb_v6_3way_live arb_v6_3way_live.py "--max-trades-per-window 2 --invest 7.0" arb_v6_3way_live_v1.log 1800
     check_bot arb_v5_3way arb_v5_3way.py "" arb_v5_3way_run.log 900
     check_bot arb_v6_3way arb_v6_3way.py "" arb_v6_3way_run.log 1800
     ;;

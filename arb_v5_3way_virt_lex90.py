@@ -74,35 +74,40 @@ from dotenv import load_dotenv
 ENV_PATH = "/root/live/btc_5m/.env"
 load_dotenv(ENV_PATH, override=True)
 
-P_DATA = "/root/data_btc_1h_research/combined_per_second.csv"
-PR_LATEST_JSON = "/root/data_predict_btc_1h/latest.json"
-PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
-LIM_LATEST_JSON = "/root/data_limitless_btc_1h/latest.json"
-LIM_MARKETS = "/root/data_limitless_btc_1h/markets.csv"
+P_DATA = "/root/data_btc_15m_research/combined_per_second.csv"
+PR_LATEST_JSON = "/root/data_predict_btc_15m/latest.json"
+PR_MARKETS = "/root/data_predict_btc_15m/markets.csv"
+LIM_LATEST_JSON = "/root/data_limitless_btc_15m/latest.json"
+LIM_MARKETS = "/root/data_limitless_btc_15m/markets.csv"
 
-LIVE_TRADES = "/root/arb_v6_3way_live_trades.csv"
-LIVE_ORDERS = "/root/arb_v6_3way_live_orders.csv"
+LIVE_TRADES = "/root/arb_v5_3way_virt_lex90_trades.csv"
+LIVE_ORDERS = "/root/arb_v5_3way_virt_lex90_orders.csv"
 
 BASE_NOTIONAL_USD = 1.20
 MAX_SIDE_USD = 7.0
 COST_THRESHOLD = 0.90
-SINGLE_LEG_MAX_ASK = 0.80
+SINGLE_LEG_MAX_ASK = 0.90  # virtual variant: raised from 0.80 for testing
 MIN_DEPTH_USD = 5.0
 PARALLEL_DEPTH_MULTIPLIER = 2.0
 EXCESS_SELL_PCT = 0.05
 LAST_SECONDS_BLOCK_CROSS_ORACLE = 60
 COOLDOWN_SEC = 5
-POLL_SEC = 0.05
+POLL_SEC = 0.05  # event-driven timeout: wake immediately on book change,
+                 # else fall back to this max-idle interval as safety net
 MAX_FEED_AGE_SEC = 10
-LIM_MAX_AGE_SEC = 20
+LIM_MAX_AGE_SEC = 60
 SETTLE_WAIT_SEC = 60
-WINDOW_SEC = 3600
+WINDOW_SEC = 900
 # Phase 2 tight timeouts: fail-fast on unresponsive platforms so the bot
 # doesn't hang for 30s waiting on a single bad API call. Polymarket order
 # placement is normally 100-300ms; 1.5s allows 5x slowdown headroom.
 ORDER_TIMEOUT_SEC = 0.8
 POST_TRADE_MIN_SLEEP = 0.05
 # Freshness model (rewritten 13/05 after 24h diagnostic + AI cross-review):
+# Silence is trusted. A leg is fresh iff:
+#   1. Heartbeat: any message in the last HEARTBEAT_MAX_MS ms.
+#   2. Transit:   last server->local delta <= TRANSIT_MAX_MS[plat].
+#   3. Skew:      leg-age gap between two legs <= MAX_SKEW_MS (loose backstop).
 HEARTBEAT_MAX_MS = 30000
 TRANSIT_MAX_MS = {
     'poly': 300,
@@ -271,14 +276,7 @@ def get_current_limitless_market_slug():
 
 
 def fetch_poly_market(epoch):
-    from datetime import timedelta
-    utc_dt = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
-    et_offset = 4 if 3 <= utc_dt.month <= 11 else 5
-    et_dt = utc_dt - timedelta(hours=et_offset)
-    month = et_dt.strftime("%B").lower()
-    hour_12 = et_dt.hour % 12 or 12
-    ampm = "am" if et_dt.hour < 12 else "pm"
-    slug = f"bitcoin-up-or-down-{month}-{et_dt.day}-{et_dt.year}-{hour_12}{ampm}-et"
+    slug = f"btc-updown-15m-{epoch}"
     url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
     # Change F: use shared PoolManager for keep-alive
     r = HTTP_POOL.request("GET", url, timeout=urllib3.Timeout(connect=3.0, read=7.0))
@@ -524,8 +522,12 @@ def check_freshness(cand, p, pr, lim, now_ms):
       - heartbeat_age = now - last_local_recv < HEARTBEAT_MAX_MS
       - last_transit_ms <= TRANSIT_MAX_MS[platform]
 
-    Silence is trusted. If no message has arrived for some time but the WS
-    has not raised a disconnect, the orderbook is unchanged.
+    Silence is trusted. If no message has arrived for 30s but the WS layer
+    has not raised a disconnect, the orderbook is unchanged. The skew check
+    has been removed; with the new semantics, both legs are either healthy
+    or not, regardless of which one updates more frequently.
+
+    Returns (ok, reason, [heartbeat_age_per_leg]).
     """
     snaps = {"poly": p, "predict": pr, "lim": lim}
     heartbeat_ages = []
@@ -823,7 +825,7 @@ def emergency_sell(ctx, leg, excess_shares):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-windows", type=int, default=9999)
-    ap.add_argument("--max-trades-per-window", type=int, default=2)
+    ap.add_argument("--max-trades-per-window", type=int, default=1)
     ap.add_argument("--invest", type=float, default=MAX_SIDE_USD)
     ap.add_argument("--stop-on-loss", action="store_true", default=True)
     ap.add_argument("--settle-wait-sec", type=int, default=SETTLE_WAIT_SEC)
@@ -831,7 +833,7 @@ def main():
                     help="run full strategy but log orders instead of submitting")
     args = ap.parse_args()
 
-    print(f"=== arb_v6_3way_live (1h) starting at {now_iso()} ===", flush=True)
+    print(f"=== arb_v5_3way_live (15min) starting at {now_iso()} ===", flush=True)
     print(f"invest_per_side=${args.invest}  max_trades_per_window={args.max_trades_per_window}", flush=True)
 
     api_key = os.environ["PREDICT_API_KEY"]
@@ -839,8 +841,8 @@ def main():
     lim_key = os.environ["LIMITLESS_API_KEY"]
     lim_sec = os.environ["LIMITLESS_API_SECRET"]
 
-    pt = PredictTrader(api_key, pk, log_path="/root/arb_v6_3way_live_predict.log")
-    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_v6_3way_live_lim.log")
+    pt = PredictTrader(api_key, pk, log_path="/root/arb_v5_3way_live_predict.log")
+    lt = LimitlessTrader(lim_key, lim_sec, pk, log_path="/root/arb_v5_3way_live_lim.log")
 
     from py_clob_client_v2.client import ClobClient
     from py_clob_client_v2.clob_types import OrderArgsV2, OrderType
@@ -911,7 +913,7 @@ def main():
 
             if window_epoch != current_epoch:
                 if current_epoch is not None and window_open_wealth is not None:
-                    print(f"\n>>> WINDOW {current_epoch} (1h) CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s...", flush=True)
+                    print(f"\n>>> WINDOW {current_epoch} CLOSED. trades={trades_this_window}. waiting {args.settle_wait_sec}s...", flush=True)
                     time.sleep(args.settle_wait_sec)
                     close_snap = snapshot_wealth(pt, poly_client, lt)
                     if not close_snap.get("valid") or not window_open_wealth.get("valid"):
@@ -1077,6 +1079,10 @@ def main():
 
             shares, max_p, min_p = size_trade(best)
             if shares is None:
+                # Capture all 3 platforms' top-of-book at this instant so
+                # later analysis can score the "phantom on one platform
+                # predicts the loser" hypothesis without re-joining recorder
+                # data. p/pr/lim were just read at top of loop iteration.
                 p_ua = p.get("ua", 0) if p else 0
                 p_da = p.get("da", 0) if p else 0
                 pr_ya = pr.get("yes_ask", 0) if pr else 0

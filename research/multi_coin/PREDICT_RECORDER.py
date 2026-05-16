@@ -64,6 +64,63 @@ def setup_signals():
     signal.signal(signal.SIGTERM, handler)
 
 
+POLY_COMBINED_PATH = "/root/data_btc_15m_research/combined_per_second.csv"
+
+
+def lookup_binance_now():
+    # Read the latest Binance price from the Polymarket recorder's combined CSV.
+    try:
+        if not os.path.exists(POLY_COMBINED_PATH):
+            return None
+        with open(POLY_COMBINED_PATH, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            seek_back = min(size, 4096)
+            f.seek(size - seek_back)
+            tail = f.read().decode("utf-8", errors="ignore")
+        lines = [ln for ln in tail.strip().split("\n") if ln]
+        for line in reversed(lines):
+            cols = line.split(",")
+            if len(cols) < 6:
+                continue
+            try:
+                price = float(cols[5])
+            except Exception:
+                continue
+            if price > 0:
+                return price
+        return None
+    except Exception:
+        return None
+
+
+def lookup_binance_at_market_open(market_open_epoch):
+    # Predict.fun strike = Binance BTCUSDT price at sec_from_start=1 of market open.
+    # Read from the Polymarket recorder's combined_per_second.csv which contains binance_price.
+    if not market_open_epoch:
+        return None
+    try:
+        if not os.path.exists(POLY_COMBINED_PATH):
+            return None
+        with open(POLY_COMBINED_PATH, "r") as f:
+            lines = f.readlines()[-10000:]
+        for line in lines:
+            cols = line.split(",")
+            if len(cols) < 6:
+                continue
+            try:
+                me = int(cols[3])
+                sec = int(cols[4])
+                price = float(cols[5])
+            except Exception:
+                continue
+            if me == market_open_epoch and sec == 1 and price > 0:
+                return price
+        return None
+    except Exception:
+        return None
+
+
 class CsvStore:
     def __init__(self, data_dir):
         self.data_dir = data_dir
@@ -71,9 +128,13 @@ class CsvStore:
         self.combined = os.path.join(self.data_dir, "combined_per_second.csv")
         self.events = os.path.join(self.data_dir, "events.csv")
         self.markets = os.path.join(self.data_dir, "markets.csv")
+        self.outcomes = os.path.join(self.data_dir, "market_outcomes.csv")
         self._init_if_missing(self.combined, [
             "local_ts", "epoch_sec",
             "market_id",
+            "market_open_epoch", "sec_from_open",
+            "strike", "binance_now",
+            "distance_signed", "distance_abs",
             "yes_bid", "yes_ask",
             "yes_bid_size", "yes_ask_size",
             "yes_bid_usd", "yes_ask_usd",
@@ -84,6 +145,11 @@ class CsvStore:
         ])
         self._init_if_missing(self.events, ["local_ts", "event", "detail"])
         self._init_if_missing(self.markets, ["local_ts", "market_id", "first_seen_ts", "order_count_at_select"])
+        self._init_if_missing(self.outcomes, [
+            "local_ts", "market_id", "market_open_epoch",
+            "strike", "settlement_price", "winner_side",
+            "next_market_id", "source",
+        ])
 
     @staticmethod
     def _init_if_missing(path, headers):
@@ -102,6 +168,10 @@ class CsvStore:
     def market_picked(self, market_id, order_count):
         with open(self.markets, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([now_local(), market_id, now_epoch(), order_count])
+
+    def append_outcome(self, row):
+        with open(self.outcomes, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(row)
 
 
 async def ws_listener(csvs):
@@ -184,8 +254,10 @@ def select_active_market() -> Optional[int]:
 
 async def discovery_loop(csvs):
     """Periodically re-pick the active market. Switch when the current one
-    becomes inactive (no orderbook updates for INACTIVE_THRESHOLD_SEC)."""
+    becomes inactive (no orderbook updates for INACTIVE_THRESHOLD_SEC).
+    On rollover, write outcome row for the just-closed market."""
     global CURRENT_MARKET_ID, CURRENT_MARKET_SINCE
+    pending_close: Optional[Dict] = None  # state of just-closed market awaiting next pick
     while not SHOULD_STOP:
         await asyncio.sleep(DISCOVERY_INTERVAL_SEC)
         # Check if current market is still active
@@ -193,6 +265,10 @@ async def discovery_loop(csvs):
             last = LAST_UPDATE.get(CURRENT_MARKET_ID, 0)
             if time.time() - last > INACTIVE_THRESHOLD_SEC:
                 csvs.event("MARKET_CLOSED", f"market_id={CURRENT_MARKET_ID} no updates for {time.time()-last:.0f}s")
+                pending_close = {
+                    "market_id": CURRENT_MARKET_ID,
+                    "since": CURRENT_MARKET_SINCE or time.time(),
+                }
                 CURRENT_MARKET_ID = None
         # If no current market or it just closed, pick a new one
         if CURRENT_MARKET_ID is None:
@@ -204,6 +280,27 @@ async def discovery_loop(csvs):
                 csvs.market_picked(picked, oc)
                 csvs.event("MARKET_PICKED", f"market_id={picked} orderCount={oc}")
                 print(f"[{now_local()}] picked market {picked} (orderCount={oc})")
+                # Outcome for the just-closed market: derive strikes from Binance
+                if pending_close:
+                    old_open = (int(pending_close["since"]) // 900) * 900
+                    new_open = (int(CURRENT_MARKET_SINCE) // 900) * 900
+                    s_old = lookup_binance_at_market_open(old_open)
+                    s_new = lookup_binance_at_market_open(new_open)
+                    winner = ""
+                    if s_old is not None and s_new is not None:
+                        if s_new > s_old:
+                            winner = "YES"
+                        elif s_new < s_old:
+                            winner = "NO"
+                        else:
+                            winner = "TIE"
+                    csvs.append_outcome([
+                        now_local(), pending_close["market_id"], old_open,
+                        f"{s_old}" if s_old is not None else "",
+                        f"{s_new}" if s_new is not None else "",
+                        winner, picked, "binance/strike-compare",
+                    ])
+                    pending_close = None
 
 
 def best_level(side):
@@ -238,8 +335,21 @@ def total_no_usd(bids):
 
 
 async def snapshot_loop(csvs):
-    """Every second, write current orderbook snapshot of CURRENT_MARKET_ID."""
+    """Every second, write a complete per-second snapshot. Always writes a row,
+    even when no active market — empty market fields, but binance_now still recorded
+    so analyses can join on epoch_sec across all 4 platforms."""
     while not SHOULD_STOP:
+        if CURRENT_MARKET_ID is None or CURRENT_MARKET_ID not in MARKETS:
+            # Write a heartbeat row with binance_now so the per-second clock is continuous
+            now_e = now_epoch()
+            binance_now = lookup_binance_now()
+            csvs.append_combined([
+                now_local(), now_e, "", "", "",
+                "", f"{binance_now:.4f}" if binance_now is not None else "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", 0, "",
+            ])
+            await asyncio.sleep(POLL_INTERVAL_SEC)
+            continue
         if CURRENT_MARKET_ID is not None and CURRENT_MARKET_ID in MARKETS:
             ob = MARKETS[CURRENT_MARKET_ID]
             bids = ob.get("bids", []) or []
@@ -253,9 +363,22 @@ async def snapshot_loop(csvs):
             no_ask_usd_buyable = (no_ask_implied * yes_bid_sz) if (no_ask_implied is not None and yes_bid_sz is not None) else 0.0
             no_ask_usd_total_v = total_no_usd(bids)
             spread = (yes_ask_p - yes_bid_p) if (yes_ask_p is not None and yes_bid_p is not None) else None
+            now_e = now_epoch()
+            market_open_epoch = (int(CURRENT_MARKET_SINCE) // 900) * 900 if CURRENT_MARKET_SINCE else None
+            sec_from_open = (now_e - market_open_epoch) if market_open_epoch else None
+            strike = lookup_binance_at_market_open(market_open_epoch) if market_open_epoch else None
+            binance_now = lookup_binance_now()
+            distance_signed = (binance_now - strike) if (binance_now is not None and strike is not None) else None
+            distance_abs = abs(distance_signed) if distance_signed is not None else None
             csvs.append_combined([
-                now_local(), now_epoch(),
+                now_local(), now_e,
                 ob.get("marketId", ""),
+                market_open_epoch if market_open_epoch is not None else "",
+                sec_from_open if sec_from_open is not None else "",
+                f"{strike:.4f}" if strike is not None else "",
+                f"{binance_now:.4f}" if binance_now is not None else "",
+                f"{distance_signed:.4f}" if distance_signed is not None else "",
+                f"{distance_abs:.4f}" if distance_abs is not None else "",
                 f"{yes_bid_p:.4f}" if yes_bid_p is not None else "",
                 f"{yes_ask_p:.4f}" if yes_ask_p is not None else "",
                 f"{yes_bid_sz:.4f}" if yes_bid_sz is not None else "",

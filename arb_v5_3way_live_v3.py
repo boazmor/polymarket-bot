@@ -88,28 +88,32 @@ MAX_SIDE_USD = 7.0
 COST_THRESHOLD = 0.90
 SINGLE_LEG_MAX_ASK = 0.80
 MIN_DEPTH_USD = 5.0
-PARALLEL_DEPTH_MULTIPLIER = 4.0
+PARALLEL_DEPTH_MULTIPLIER = 2.0
 EXCESS_SELL_PCT = 0.05
 LAST_SECONDS_BLOCK_CROSS_ORACLE = 60
 COOLDOWN_SEC = 5
-POLL_SEC = 0.2
+POLL_SEC = 0.05  # event-driven timeout: wake immediately on book change,
+                 # else fall back to this max-idle interval as safety net
 MAX_FEED_AGE_SEC = 10
-LIM_MAX_AGE_SEC = 20
+LIM_MAX_AGE_SEC = 60
 SETTLE_WAIT_SEC = 60
 WINDOW_SEC = 900
 # Phase 2 tight timeouts: fail-fast on unresponsive platforms so the bot
 # doesn't hang for 30s waiting on a single bad API call. Polymarket order
 # placement is normally 100-300ms; 1.5s allows 5x slowdown headroom.
-ORDER_TIMEOUT_SEC = 0.8  # tightened from 1.5s after AI review: FAK that doesn't fill in 500-800ms is stale anyway
-POST_TRADE_MIN_SLEEP = 0.05  # floor for Change E so we don't busy-spin on a malformed feed
-# Phase 2 quote-freshness gates (per AI freshness review):
-MAX_QUOTE_AGE_MS = {  # per-platform after empirical data + AI review
-    'poly': 200,
-    'lim': 600,
-    'predict': 3000,
+ORDER_TIMEOUT_SEC = 0.8
+POST_TRADE_MIN_SLEEP = 0.05
+# Freshness model (rewritten 13/05 after 24h diagnostic + AI cross-review):
+# Silence is trusted. A leg is fresh iff:
+#   1. Heartbeat: any message in the last HEARTBEAT_MAX_MS ms.
+#   2. Transit:   last server->local delta <= TRANSIT_MAX_MS[plat].
+#   3. Skew:      leg-age gap between two legs <= MAX_SKEW_MS (loose backstop).
+HEARTBEAT_MAX_MS = 30000
+TRANSIT_MAX_MS = {
+    'poly': 300,
+    'lim': 300,
+    'predict': 300,
 }
-MAX_QUOTE_AGE_SKEW_MS = 500  # reject if leg ages differ by >500ms (asymmetric staleness, tightened from 1000)
-# LATE_FILL_GRACE_MS removed — late-fill probe deferred to Phase 3
 
 ORACLE_BY_PLATFORM = {
     "poly": "chainlink",
@@ -127,6 +131,15 @@ ANSI_BOLD = "\033[1m"
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def wait_for_update(timeout=None):
+    """Event-driven sleep: wake the moment a WS thread reports a meaningful
+    book change, or after `timeout` seconds, whichever comes first. Defaults
+    to POLL_SEC so this is a drop-in replacement for time.sleep(POLL_SEC)."""
+    t = POLL_SEC if timeout is None else timeout
+    STATE.wake_event.wait(timeout=t)
+    STATE.wake_event.clear()
 
 
 def log_order(stage, **kw):
@@ -189,10 +202,14 @@ def parse_poly(row, hdr):
     return {
         "epoch": book.last_update_ms // 1000,
         "ts_ms": book.last_update_ms,
+        "last_update_ms": book.last_update_ms,
+        "server_ts_ms": book.server_ts_ms,
+        "last_transit_ms": book.last_transit_ms,
+        "connected": book.connected,
         "slug": slug,
         "tgt": target,
-        "ua": book.best_ask,  # Polymarket "up_ask" = price to BUY Up
-        "da": book.no_best_ask,  # Down = CTF complement
+        "ua": book.best_ask,
+        "da": book.no_best_ask,
         "ua_usd": book.ask_depth_usd,
         "da_usd": book.no_ask_depth_usd,
     }
@@ -210,6 +227,10 @@ def parse_predict_latest():
     return {
         "epoch": book.last_update_ms // 1000,
         "ts_ms": book.last_update_ms,
+        "last_update_ms": book.last_update_ms,
+        "server_ts_ms": book.server_ts_ms,
+        "last_transit_ms": book.last_transit_ms,
+        "connected": book.connected,
         "market_id": book.market_id,
         "yes_ask": book.best_ask,
         "yes_bid": book.best_bid,
@@ -227,6 +248,10 @@ def parse_limitless_latest():
     return {
         "epoch": book.last_update_ms // 1000,
         "ts_ms": book.last_update_ms,
+        "last_update_ms": book.last_update_ms,
+        "server_ts_ms": book.server_ts_ms,
+        "last_transit_ms": book.last_transit_ms,
+        "connected": book.connected,
         "market_id": book.market_id,
         "slug": book.slug,
         "up_ask": book.best_ask,
@@ -491,36 +516,43 @@ def can_fire_parallel(cand, shares):
 
 
 def check_freshness(cand, p, pr, lim, now_ms):
-    """Verify each leg's underlying feed is fresh AND that the two legs are
-    not asymmetrically stale relative to each other. Returns (ok, reason, ages).
+    """Per-leg health check: WS connection alive AND last message transit OK.
 
-    POLY note: the Polymarket recorder writes only second-precision
-    `epoch_sec` to its CSV. We use the file mtime of the CSV as a ms-precision
-    proxy for "last update time" — that's when the recorder last wrote a row,
-    which is its last received WS message.
+    A leg is fresh iff:
+      - heartbeat_age = now - last_local_recv < HEARTBEAT_MAX_MS
+      - last_transit_ms <= TRANSIT_MAX_MS[platform]
+
+    Silence is trusted. If no message has arrived for 30s but the WS layer
+    has not raised a disconnect, the orderbook is unchanged. The skew check
+    has been removed; with the new semantics, both legs are either healthy
+    or not, regardless of which one updates more frequently.
+
+    Returns (ok, reason, [heartbeat_age_per_leg]).
     """
-    leg_ages_ms = []
+    snaps = {"poly": p, "predict": pr, "lim": lim}
+    heartbeat_ages = []
     for leg in cand["legs"]:
         plat = leg["platform"]
-        # v3: all 3 platforms expose ms-precision ts_ms from their WS thread
-        if plat == "poly":
-            ts_ms_leg = p.get("ts_ms", 0) if p else 0
-        elif plat == "predict":
-            ts_ms_leg = pr.get("ts_ms", 0) if pr else 0
-        elif plat == "lim":
-            ts_ms_leg = lim.get("ts_ms", 0) if lim else 0
-        else:
-            ts_ms_leg = 0
-        age = now_ms - ts_ms_leg if ts_ms_leg > 0 else 999_999
-        leg_ages_ms.append(age)
-        plat_limit = MAX_QUOTE_AGE_MS.get(plat, 500) if isinstance(MAX_QUOTE_AGE_MS, dict) else MAX_QUOTE_AGE_MS
-        if age > plat_limit:
-            return False, f"stale_{plat}_{age}ms", leg_ages_ms
-    if len(leg_ages_ms) == 2:
-        skew = abs(leg_ages_ms[0] - leg_ages_ms[1])
-        if skew > MAX_QUOTE_AGE_SKEW_MS:
-            return False, f"asymmetric_skew_{skew}ms", leg_ages_ms
-    return True, "fresh", leg_ages_ms
+        snap = snaps.get(plat)
+        if not snap:
+            return False, f"no_snap_{plat}", heartbeat_ages
+        if not snap.get("connected", False):
+            return False, f"disconnected_{plat}", heartbeat_ages
+        last_local = snap.get("last_update_ms", 0)
+        if last_local <= 0:
+            return False, f"no_data_{plat}", heartbeat_ages
+        heartbeat_age = now_ms - last_local
+        heartbeat_ages.append(heartbeat_age)
+        if heartbeat_age > HEARTBEAT_MAX_MS:
+            return False, f"heartbeat_stale_{plat}_{heartbeat_age}ms", heartbeat_ages
+        transit = snap.get("last_transit_ms", 0)
+        plat_limit = TRANSIT_MAX_MS.get(plat, 300)
+        if transit > plat_limit:
+            return False, f"transit_slow_{plat}_{transit}ms", heartbeat_ages
+    # Skew gate intentionally removed: with "trust silence" semantics, two
+    # legs with very different heartbeat ages just means one platform is
+    # quieter than the other. Both can still be fresh.
+    return True, "fresh", heartbeat_ages
 
 
 def place_poly(poly_client, OrderArgsV2, OrderType, leg, price, shares, dry_run=False):
@@ -903,6 +935,13 @@ def main():
                     windows_done += 1
                     if args.stop_on_loss and close_snap.get("valid") and window_pnl < 0:
                         print(f"\n!!! STOP: window PnL ${window_pnl:+.4f} < 0. cumulative ${cumulative_pnl:+.4f}", flush=True)
+                        try:
+                            stop_path = f"/root/{os.path.basename(__file__).replace('.py','')}.stopped"
+                            with open(stop_path, "w") as sf:
+                                sf.write(f"{now_iso()} stop_on_loss window_pnl=${window_pnl:+.4f} cum_pnl=${cumulative_pnl:+.4f}\n")
+                            log_order("STOP_FILE_WRITTEN", path=stop_path)
+                        except Exception as e:
+                            print(f"failed to write stop file: {e}", flush=True)
                         break
                     if windows_done >= args.max_windows:
                         break
@@ -1040,9 +1079,24 @@ def main():
 
             shares, max_p, min_p = size_trade(best)
             if shares is None:
+                # Capture all 3 platforms' top-of-book at this instant so
+                # later analysis can score the "phantom on one platform
+                # predicts the loser" hypothesis without re-joining recorder
+                # data. p/pr/lim were just read at top of loop iteration.
+                p_ua = p.get("ua", 0) if p else 0
+                p_da = p.get("da", 0) if p else 0
+                pr_ya = pr.get("yes_ask", 0) if pr else 0
+                pr_na = pr.get("no_ask_implied", 0) if pr else 0
+                lim_ua = lim.get("up_ask", 0) if lim else 0
+                lim_da = lim.get("down_ask", 0) if lim else 0
+                sec_in_window = (int(time.time()) - current_epoch) if current_epoch else -1
                 log_order("SKIP_SIZE_OVER_CAP",
                           dir=best["direction"], min_p=min_p, max_p=max_p,
-                          cap=MAX_SIDE_USD)
+                          cap=MAX_SIDE_USD,
+                          poly_ua=round(p_ua, 4), poly_da=round(p_da, 4),
+                          pr_ya=round(pr_ya, 4), pr_na=round(pr_na, 4),
+                          lim_ua=round(lim_ua, 4), lim_da=round(lim_da, 4),
+                          sec_in=sec_in_window)
                 time.sleep(POLL_SEC)
                 continue
 

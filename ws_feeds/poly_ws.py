@@ -53,7 +53,11 @@ async def _handle_one(entry, token_to_side, state, platform):
     if not side:
         return  # event for a token we don't track
 
-    now_ms = int(time.time() * 1000)
+    server_ts = entry.get("timestamp")
+    try:
+        server_ts_ms = int(server_ts) if server_ts is not None else 0
+    except (TypeError, ValueError):
+        server_ts_ms = 0
 
     if event_type == "book":
         bids = entry.get("bids") or []
@@ -63,17 +67,18 @@ async def _handle_one(entry, token_to_side, state, platform):
             best_ask = float(asks[0]["price"]) if asks else 0.0
             bid_depth = float(bids[0]["size"]) * best_bid if bids else 0.0
             ask_depth = float(asks[0]["size"]) * best_ask if asks else 0.0
+            # DOWN side via CTF complement of UP bid: anyone willing to BUY UP
+            # at price X implies someone selling DOWN at price (1 - X).
+            no_best_ask = round(1.0 - best_bid, 4) if best_bid > 0 else 0.0
             state.update(platform,
                          best_bid=best_bid, best_ask=best_ask,
                          bid_depth_usd=bid_depth, ask_depth_usd=ask_depth,
-                         ts_ms=now_ms, connected=True)
-        # We don't update from DOWN-side updates here; the v3 bot can read
-        # poly.best_ask/best_bid for the UP token directly.
+                         no_best_ask=no_best_ask,
+                         no_ask_depth_usd=bid_depth,
+                         server_ts_ms=server_ts_ms, connected=True)
 
     elif event_type == "price_change":
-        # Single-level update. Polymarket sends one row at a time.
-        # We update only if the affected level is the best bid/ask we track.
-        changes = entry.get("changes") or [entry]  # newer format wraps in changes
+        changes = entry.get("changes") or [entry]
         for ch in changes:
             try:
                 price = float(ch.get("price", 0))
@@ -83,14 +88,16 @@ async def _handle_one(entry, token_to_side, state, platform):
                 continue
             book = state.get(platform)
             if side == "up":
-                if ch_side == "SELL" and abs(price - book.best_ask) < 1e-9:
+                if ch_side == "SELL" and abs(price - book.best_ask) < 1e-4:
                     state.update(platform,
                                  ask_depth_usd=size * price,
-                                 ts_ms=now_ms, connected=True)
-                elif ch_side == "BUY" and abs(price - book.best_bid) < 1e-9:
+                                 server_ts_ms=server_ts_ms, connected=True)
+                elif ch_side == "BUY" and abs(price - book.best_bid) < 1e-4:
+                    new_bid_depth = size * price
                     state.update(platform,
-                                 bid_depth_usd=size * price,
-                                 ts_ms=now_ms, connected=True)
+                                 bid_depth_usd=new_bid_depth,
+                                 no_ask_depth_usd=new_bid_depth,
+                                 server_ts_ms=server_ts_ms, connected=True)
 
 
 async def poly_ws_main(tokens_provider, state):

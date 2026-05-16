@@ -43,8 +43,35 @@ from typing import Optional, Dict, Any
 import requests
 
 API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+POLY_COMBINED_PATH = "/root/data_btc_15m_research/combined_per_second.csv"
 POLL_INTERVAL_SEC = 1.0   # one snapshot per second
 HTTP_TIMEOUT = 5
+
+
+def lookup_binance_now() -> Optional[float]:
+    # Read latest Binance price from Polymarket recorder's combined CSV.
+    try:
+        if not os.path.exists(POLY_COMBINED_PATH):
+            return None
+        with open(POLY_COMBINED_PATH, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            seek_back = min(size, 4096)
+            f.seek(size - seek_back)
+            tail = f.read().decode("utf-8", errors="ignore")
+        for line in reversed([ln for ln in tail.strip().split("\n") if ln]):
+            cols = line.split(",")
+            if len(cols) < 6:
+                continue
+            try:
+                price = float(cols[5])
+            except Exception:
+                continue
+            if price > 0:
+                return price
+        return None
+    except Exception:
+        return None
 
 # --- runtime config (set by main()) ---
 COIN: str = "BTC"
@@ -89,10 +116,12 @@ class CsvStore:
             "combined": os.path.join(self.data_dir, "combined_per_second.csv"),
             "markets":  os.path.join(self.data_dir, "markets.csv"),
             "events":   os.path.join(self.data_dir, "events.csv"),
+            "outcomes": os.path.join(self.data_dir, "market_outcomes.csv"),
         }
         self._init(self.paths["combined"], [
             "local_ts", "epoch_sec", "sec_from_open",
             "market_ticker", "event_ticker", "floor_strike", "strike_type",
+            "binance_now", "distance_signed", "distance_abs",
             "yes_bid", "yes_ask", "yes_bid_size", "yes_ask_size",
             "no_bid", "no_ask",
             "last_price", "volume_fp", "volume_24h_fp", "open_interest_fp",
@@ -103,6 +132,10 @@ class CsvStore:
             "open_time", "close_time", "expected_expiration_time", "title",
         ])
         self._init(self.paths["events"], ["local_ts", "event", "detail"])
+        self._init(self.paths["outcomes"], [
+            "local_ts", "market_ticker", "event_ticker", "floor_strike",
+            "settlement_price", "winner_side", "next_market_ticker", "source",
+        ])
 
     @staticmethod
     def _init(path: str, headers):
@@ -168,6 +201,8 @@ def time_to_epoch(s: Optional[str]) -> Optional[int]:
 # ============================================================
 def main_loop(csvs: CsvStore):
     current_ticker: Optional[str] = None
+    current_event_ticker: Optional[str] = None
+    current_floor_strike: Optional[float] = None
     current_open_epoch: Optional[int] = None
 
     csvs.event("START", f"COIN={COIN} SERIES={SERIES_TICKER} POLL={POLL_INTERVAL_SEC}s")
@@ -185,18 +220,46 @@ def main_loop(csvs: CsvStore):
         if ticker != current_ticker:
             # rollover (or first market)
             event_ticker = m.get("event_ticker", "")
+            new_floor = m.get("floor_strike")
+            try:
+                new_floor_f = float(new_floor) if new_floor is not None else None
+            except Exception:
+                new_floor_f = None
             csvs.append("markets", [
-                now_local(), ticker, event_ticker, m.get("floor_strike"),
+                now_local(), ticker, event_ticker, new_floor,
                 m.get("open_time"), m.get("close_time"),
                 m.get("expected_expiration_time"), m.get("title"),
             ])
             csvs.event("MARKET_ROLLOVER", f"{current_ticker} -> {ticker}")
+            # Outcome: previous market's settlement price = new market's floor_strike.
+            if current_ticker and current_floor_strike is not None and new_floor_f is not None:
+                if new_floor_f > current_floor_strike:
+                    winner = "YES"
+                elif new_floor_f < current_floor_strike:
+                    winner = "NO"
+                else:
+                    winner = "TIE"
+                csvs.append("outcomes", [
+                    now_local(), current_ticker, current_event_ticker or "",
+                    f"{current_floor_strike}", f"{new_floor_f}",
+                    winner, ticker, "rollover/strike-compare",
+                ])
             current_ticker = ticker
+            current_event_ticker = event_ticker
+            current_floor_strike = new_floor_f
             current_open_epoch = time_to_epoch(m.get("open_time"))
 
         sec_from_open = None
         if current_open_epoch:
             sec_from_open = max(0, now_epoch_s() - current_open_epoch)
+
+        binance_now = lookup_binance_now()
+        try:
+            strike_f = float(m.get("floor_strike") or 0)
+        except Exception:
+            strike_f = 0.0
+        distance_signed = (binance_now - strike_f) if (binance_now is not None and strike_f > 0) else None
+        distance_abs = abs(distance_signed) if distance_signed is not None else None
 
         csvs.append("combined", [
             now_local(),
@@ -206,6 +269,9 @@ def main_loop(csvs: CsvStore):
             m.get("event_ticker"),
             m.get("floor_strike"),
             m.get("strike_type"),
+            f"{binance_now:.4f}" if binance_now is not None else "",
+            f"{distance_signed:.4f}" if distance_signed is not None else "",
+            f"{distance_abs:.4f}" if distance_abs is not None else "",
             m.get("yes_bid_dollars"),
             m.get("yes_ask_dollars"),
             m.get("yes_bid_size_fp"),

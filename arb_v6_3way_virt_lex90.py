@@ -80,13 +80,13 @@ PR_MARKETS = "/root/data_predict_btc_1h/markets.csv"
 LIM_LATEST_JSON = "/root/data_limitless_btc_1h/latest.json"
 LIM_MARKETS = "/root/data_limitless_btc_1h/markets.csv"
 
-LIVE_TRADES = "/root/arb_v6_3way_live_trades.csv"
-LIVE_ORDERS = "/root/arb_v6_3way_live_orders.csv"
+LIVE_TRADES = "/root/arb_v6_3way_virt_lex90_trades.csv"
+LIVE_ORDERS = "/root/arb_v6_3way_virt_lex90_orders.csv"
 
 BASE_NOTIONAL_USD = 1.20
 MAX_SIDE_USD = 7.0
 COST_THRESHOLD = 0.90
-SINGLE_LEG_MAX_ASK = 0.80
+SINGLE_LEG_MAX_ASK = 0.90  # virtual variant: raised from 0.80 for testing
 MIN_DEPTH_USD = 5.0
 PARALLEL_DEPTH_MULTIPLIER = 2.0
 EXCESS_SELL_PCT = 0.05
