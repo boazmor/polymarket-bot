@@ -77,6 +77,10 @@ case "$HOST" in
     # 15-min bot: log must update within 180s (3 min) - tighter than the
     # default 600s since a hung 15-min bot loses an entire window quickly.
     check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 180
+    # consensus_v2 (filtered — poly+pred required, skip dist 50-100, skip NYC 3/9/11/14)
+    check_bot consensus_v2 live/consensus_v2/CONSENSUS_BTC_V2.py "--invest-usd 2.0 --out-dir /root/live/consensus_v2" live/consensus_v2/consensus_v2.log 600
+
+
     # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict
     # fills from 11/05 that need manual reconciliation before resuming.
     # check_bot arb_v7_live arb_v7_live.py "--max-trades-per-window 1 --invest 7.0" arb_v7_live_v6.log 600
