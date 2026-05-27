@@ -529,10 +529,7 @@ def decide_v2(poly, pred, lim, gem, kal, thr, window_epoch):
     dist = (poly or {}).get("distance")
     if dist is not None and 50 <= abs(dist) <= 100:
         return None, None, None, 0, f"distance_in_bad_zone_{abs(dist):.0f}"
-    # NYC hour filter
     nyc_hr = (datetime.fromtimestamp(window_epoch, tz=timezone.utc) - timedelta(hours=4)).hour
-    if nyc_hr in {3, 9, 11, 14}:
-        return None, None, None, 0, f"nyc_hour_{nyc_hr}_blocked"
     # cheapest of poly/predict for chosen side
     poly_price = pu if side == "UP" else pd
     pred_price = yu if side == "UP" else yd
