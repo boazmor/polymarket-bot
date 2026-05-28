@@ -81,7 +81,7 @@ case "$HOST" in
     # consensus_v3 (V2 + third-platform sim+agree, scans sec 30-270, fires on first match)
     check_bot consensus_v3 live/consensus_v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3" live/consensus_v3/consensus_v3.log 600
     # consensus_v3_2 (3-of-4 fast consensus, buy cheapest 5m platform, Kalshi signal-only)
-    check_bot consensus_v3_2 live/consensus_v3_2/CONSENSUS_BTC_V3_2.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3_2 --thr 0.70 --similar-gap 200" live/consensus_v3_2/consensus_v3_2.log 900
+    check_bot consensus_v3_2 live/consensus_v3_2/CONSENSUS_BTC_V3_2.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3_2 --thr 0.60 --similar-gap 200" live/consensus_v3_2/consensus_v3_2.log 900
 
 
     # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict

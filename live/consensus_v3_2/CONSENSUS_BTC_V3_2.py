@@ -47,6 +47,10 @@ GEM_DATA = "/root/data_gemini_btc_5m/combined_per_second.csv"
 GEM_MK = "/root/data_gemini_btc_5m/markets.csv"
 KAL_DATA = "/root/data_kalshi_btc_15m/combined_per_second.csv"
 KAL_MK = "/root/data_kalshi_btc_15m/markets.csv"
+PRED15_DATA = "/root/data_predict_btc_15m/combined_per_second.csv"
+LIM15_DATA = "/root/data_limitless_btc_15m/combined_per_second.csv"
+LIM15_MK = "/root/data_limitless_btc_15m/markets.csv"
+OKX15_DATA = "/root/data_okx_btc_15m/combined_per_second.csv"
 
 # ----- strategy params (defaults match backtest sweet spot) -----
 DEFAULT_THR = 0.70
@@ -55,8 +59,8 @@ DEFAULT_WIN_HALF = 5      # narrower median window for fast first-match
 DEFAULT_SIMILAR_GAP = 5.0 # third-platform target must be within this many USD
 
 # ----- V3 fire band: scan early to late, fire on first match -----
-FIRE_SEC_MIN = 30
-FIRE_SEC_MAX = 270
+FIRE_SEC_MIN = 10
+FIRE_SEC_MAX = 295
 
 # ----- final-snapshot window: capture each platform's outcome -----
 FINAL_SEC_MIN = 295
@@ -679,6 +683,82 @@ def decide(poly, pred, lim, gem, kal, thr, min_agreements=2):
     return (side, cheapest[0], cheapest[1], len(votes))
 
 
+def _fnum(v):
+    try:
+        return float(v) if v not in ("", "None", None) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _vote_from(up, dn, thr):
+    uo = up is not None and up >= thr
+    do = dn is not None and dn >= thr
+    if uo and not do:
+        return "UP"
+    if do and not uo:
+        return "DOWN"
+    return None
+
+
+def _lim15_open_map():
+    m = {}
+    try:
+        for r in csv.DictReader(open(LIM15_MK)):
+            try:
+                m[r["market_id"]] = int(r["expirationTimestamp"]) // 1000 - 900
+            except (ValueError, KeyError, TypeError):
+                pass
+    except FileNotFoundError:
+        pass
+    return m
+
+
+def snapshot_15m_part3(window_epoch, sec_now, thr, win=20):
+    """Concurrent 15-min windows (open = window_epoch-600) in their PART 3,
+    read near sec_now. Returns {pred15, lim15, okx15} votes for support logging."""
+    o15 = window_epoch - 600
+    tsec = int(sec_now) + 600
+    res = {"pred15": None, "lim15": None, "okx15": None}
+    def scan(path, oe_match, sec_of, up_c, dn_c):
+        u = d = None; best = 99999
+        try:
+            for r in csv.DictReader(open(path)):
+                oe = oe_match(r)
+                if oe != o15:
+                    continue
+                sv = sec_of(r)
+                if sv is None:
+                    continue
+                dd = abs(sv - tsec)
+                if dd <= win and dd < best:
+                    best = dd; u = _fnum(r.get(up_c)); d = _fnum(r.get(dn_c))
+        except (FileNotFoundError, ValueError):
+            pass
+        return u, d
+    # predict 15m
+    def p_oe(r):
+        try: return int(r["market_open_epoch"])
+        except (ValueError, KeyError, TypeError): return None
+    def p_sec(r):
+        try: return int(r["sec_from_open"])
+        except (ValueError, KeyError, TypeError): return None
+    u, d = scan(PRED15_DATA, p_oe, p_sec, "yes_ask", "no_ask_implied")
+    res["pred15"] = _vote_from(u, d, thr)
+    # okx 15m
+    u, d = scan(OKX15_DATA, p_oe, p_sec, "up_ask", "down_ask")
+    res["okx15"] = _vote_from(u, d, thr)
+    # limitless 15m
+    m = _lim15_open_map()
+    def l_oe(r): return m.get(r.get("market_id"))
+    def l_sec(r):
+        oe = m.get(r.get("market_id"))
+        try: return int(r["epoch_sec"]) - oe if oe is not None else None
+        except (ValueError, KeyError, TypeError): return None
+    u, d = scan(LIM15_DATA, l_oe, l_sec, "best_ask", "no_best_ask")
+    res["lim15"] = _vote_from(u, d, thr)
+    return res
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", default=True,
@@ -719,7 +799,9 @@ def main():
         "ts_utc", "window_epoch", "sec_now", "side", "platform", "price",
         "shares", "cap_usd", "invest_usd_requested",
         "liq_usd_available", "potential_profit_if_win",
-        "third_name", "third_gap_usd", "mode"
+        "third_name", "third_gap_usd",
+        "p15_vote", "l15_vote", "o15_vote", "n15_agree", "n15_opp",
+        "mode"
     ])
     ensure_csv(limitless_path, [
         "ts_utc", "window_epoch", "lim_market_id", "lim_yes_ask",
@@ -867,8 +949,7 @@ def main():
                         pred.get("no_ask"), False, None, None, None,
                         f"no_data poly_n={poly['n_samples']} pred_n={pred['n_samples']}"
                     ])
-                log(f"window {window_epoch} sec={sec_now:.0f} ג€” no data (poly_n={poly['n_samples']} pred_n={pred['n_samples']})")
-                last_decided_window = window_epoch
+                # do NOT mark window done on transient no-data; retry next tick
                 time.sleep(POLL_SEC)
                 continue
 
@@ -909,6 +990,9 @@ def main():
                 shares = cap_usd / price
                 # Potential profit if won = shares * (1 - price)
                 pot_profit_if_win = shares * (1 - price)
+                s15 = snapshot_15m_part3(window_epoch, sec_now, args.thr)
+                n15_agree = sum(1 for v in s15.values() if v == side)
+                n15_opp = sum(1 for v in s15.values() if v and v != side)
                 with open(trades_path, "a", newline="") as f:
                     csv.writer(f).writerow([
                         ts_iso, window_epoch, int(sec_now), side, platform, price,
@@ -916,6 +1000,7 @@ def main():
                         round(usd_avail or 0, 2), round(pot_profit_if_win, 4),
                         third["name"] if third else None,
                         round(third["gap"], 2) if third else None,
+                        s15["pred15"], s15["lim15"], s15["okx15"], n15_agree, n15_opp,
                         "DRY"
                     ])
                 log(f"window {window_epoch} sec={int(sec_now)} V3 FIRE {side} on {platform.upper()} "
