@@ -120,6 +120,30 @@ restart_kalshi_new() {
           echo "  RESTARTED: rec_predict_btc_5m"
           FIXED=$((FIXED + 1))
           ;;
+        predict_btc_15m)
+          screen -X -S rec_predict_btc_15m quit 2>/dev/null
+          pkill -f "PREDICT_RECORDER_15M" 2>/dev/null
+          sleep 1
+          screen -dmS rec_predict_btc_15m bash -c "cd /root && python3 -u PREDICT_RECORDER_15M_V2.py --data-dir /root/data_predict_btc_15m > /root/rec_predict_btc_15m.log 2>&1"
+          echo "  RESTARTED: rec_predict_btc_15m"
+          FIXED=$((FIXED + 1))
+          ;;
+        limitless_btc_15m)
+          screen -X -S rec_limitless_btc_15m quit 2>/dev/null
+          pkill -f "LIMITLESS_RECORDER.py --window 15m" 2>/dev/null
+          sleep 1
+          screen -dmS rec_limitless_btc_15m bash -c "cd /root && python3 -u LIMITLESS_RECORDER.py --window 15m --data-dir /root/data_limitless_btc_15m > /root/rec_limitless_btc_15m.log 2>&1"
+          echo "  RESTARTED: rec_limitless_btc_15m"
+          FIXED=$((FIXED + 1))
+          ;;
+        okx_btc)
+          screen -X -S rec_okx_btc quit 2>/dev/null
+          pkill -f "OKX_RECORDER.py" 2>/dev/null
+          sleep 1
+          screen -dmS rec_okx_btc bash -c "cd /root && python3 -u OKX_RECORDER.py > /root/rec_okx_btc.log 2>&1"
+          echo "  RESTARTED: rec_okx_btc"
+          FIXED=$((FIXED + 1))
+          ;;
         gemini_btc)
           restart_gemini "$coin"; FIXED=$((FIXED + 1)) ;;
         kalshi_new)
@@ -154,6 +178,11 @@ restart_kalshi_new() {
     check_and_fix "gemini_btc_5m" "/root/data_gemini_btc_5m/combined_per_second.csv" 3600 gemini_btc "btc" "5m"
     echo "--- Helsinki Kalshi 15m recorder (BTC only) ---"
     check_and_fix "kalshi_btc_15m" "/root/data_kalshi_btc_15m/combined_per_second.csv" 1800 kalshi_new "btc" "15m"
+    echo "--- Helsinki Predict 15m + Limitless 15m recorders (BTC only) ---"
+    check_and_fix "predict_btc_15m" "/root/data_predict_btc_15m/combined_per_second.csv" 1800 predict_btc_15m "btc" "15m"
+    check_and_fix "limitless_btc_15m" "/root/data_limitless_btc_15m/combined_per_second.csv" 1800 limitless_btc_15m "btc" "15m"
+    echo "--- Helsinki OKX Event Contracts recorder (BTC 5m + 15m, one process) ---"
+    check_and_fix "okx_btc_5m" "/root/data_okx_btc_5m/combined_per_second.csv" 1800 okx_btc "btc" "5m"
   else
     echo "--- Germany multi-window recorders ---"
     for c in btc eth sol xrp doge bnb hype; do
