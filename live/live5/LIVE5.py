@@ -29,6 +29,7 @@ DOES NOT modify or touch any recorder data dir.
 """
 import argparse
 import csv
+import math
 import os
 import statistics
 import sys
@@ -52,6 +53,12 @@ LIM15_DATA = "/root/data_limitless_btc_15m/combined_per_second.csv"
 LIM15_MK = "/root/data_limitless_btc_15m/markets.csv"
 OKX15_DATA = "/root/data_okx_btc_15m/combined_per_second.csv"
 OKX5_DATA = "/root/data_okx_btc_5m/combined_per_second.csv"
+
+# ----- live trading config -----
+ENV_PATH = "/root/live/btc_5m/.env"
+POLY_SAFE = "0x28Ae0B1f1e0e5a3F3eF0172CE28e0D19C197938B"
+POLY_HOST = "https://clob.polymarket.com"
+DEFAULT_MAX_CONSEC_LOSSES = 2  # circuit breaker: stop after this many losing live trades in a row
 
 # ----- strategy params (LIVE5 = part-3 recipe) -----
 DEFAULT_THR = 0.70
@@ -78,6 +85,7 @@ OUT_LIMITLESS = "live5_limitless.csv"
 OUT_GEMINI = "live5_gemini.csv"
 OUT_KALSHI = "live5_kalshi.csv"
 OUT_OUTCOMES = "live5_outcomes.csv"
+OUT_ORDERS = "live5_orders.csv"
 
 
 def log(msg):
@@ -874,12 +882,172 @@ def get_pred15_strike(window_epoch):
     return strike
 
 
+# ===================== LIVE ORDER PLACEMENT =====================
+# All three platforms supported. LIVE5 buys the cheapest of {poly,pred,lim}; this
+# places a real FAK/marketable order on whichever was chosen. Metadata is read from
+# the same recorder markets.csv files the bot already trusts (poly tokens, predict
+# market_id, limitless slug); predict outcome meta is fetched once per market via API.
+
+def poly_tokens(window_epoch):
+    """(up_token, down_token) for the poly 5m market opening at window_epoch."""
+    res = (None, None)
+    try:
+        for r in csv.DictReader(open(POLY_MK)):
+            try:
+                if int(r.get("market_epoch") or 0) == window_epoch:
+                    res = (r.get("up_token"), r.get("down_token"))
+            except (ValueError, TypeError):
+                continue
+    except OSError:
+        pass
+    return res
+
+
+def predict_market_id(window_epoch):
+    mid = None
+    try:
+        for r in csv.DictReader(open(PRED_MK)):
+            try:
+                if int(r.get("market_open_epoch") or 0) == window_epoch:
+                    mid = int(r.get("market_id"))
+            except (ValueError, TypeError):
+                continue
+    except OSError:
+        pass
+    return mid
+
+
+def limitless_slug(window_epoch):
+    slug = None
+    try:
+        for r in csv.DictReader(open(LIM_MK)):
+            try:
+                if int(r.get("expirationTimestamp")) // 1000 - 300 == window_epoch:
+                    slug = r.get("slug")
+            except (ValueError, TypeError):
+                continue
+    except OSError:
+        pass
+    return slug
+
+
+def order_price(plat, ask):
+    """Marketable, tick-valid limit price. Poly ticks in cents; round UP to cross."""
+    if plat == "poly":
+        p = math.ceil(ask * 100) / 100.0
+    else:
+        p = round(min(ask + 0.01, 0.98), 2)
+    return max(0.02, min(p, 0.98))
+
+
+def log_order(orders_path, stage, **kw):
+    row = {"ts": datetime.now(tz=timezone.utc).isoformat(), "stage": stage, **kw}
+    new = not os.path.exists(orders_path)
+    with open(orders_path, "a", newline="") as f:
+        if new:
+            f.write("ts,stage," + ",".join(k for k in row if k not in ("ts", "stage")) + "\n")
+        f.write(",".join(str(v).replace(",", ";")[:300] for v in row.values()) + "\n")
+    log("ORDER " + stage + ": " + " ".join(f"{k}={str(v)[:60]}" for k, v in kw.items()))
+
+
+def place_poly(ctx, side, price, shares, token):
+    cl, OrderArgsV2, OrderType = ctx["poly_client"], ctx["OrderArgsV2"], ctx["OrderType"]
+    args = OrderArgsV2(price=round(price, 4), size=round(shares, 4), side="BUY", token_id=str(token))
+    resp = cl.create_and_post_order(args, order_type=OrderType.FAK)
+    ok = bool(resp) and resp.get("status") == "matched"
+    return {"ok": ok, "size_filled": float(resp.get("size_matched") or 0) if ok else 0.0, "raw": resp}
+
+
+def place_predict(ctx, side, price, shares, market_id):
+    meta = ctx["predict_meta_cache"].get(market_id)
+    if meta is None:
+        m = ctx["pt"].get_market(market_id)
+        meta = {"outcomes": m["outcomes"], "isNegRisk": m["isNegRisk"],
+                "isYieldBearing": m["isYieldBearing"], "feeRateBps": m["feeRateBps"]}
+        ctx["predict_meta_cache"][market_id] = meta
+    name = "Up" if side == "UP" else "Down"
+    outcome = next(o for o in meta["outcomes"] if o["name"] == name)
+    resp = ctx["pt"].place_limit(
+        market_id=market_id, outcome_token_id=outcome["onChainId"], side="BUY",
+        price=price, shares=shares, is_neg_risk=meta["isNegRisk"],
+        is_yield_bearing=meta["isYieldBearing"], fee_rate_bps=meta["feeRateBps"])
+    ok = bool(resp.get("orderId")) and resp.get("code") == "OK"
+    return {"ok": ok, "size_filled": shares if ok else 0.0, "raw": resp}
+
+
+def place_limitless(ctx, side, price, cap_usd, slug):
+    market = ctx["lt"].cache_market(slug)
+    token_id = market.tokens.yes if side == "UP" else market.tokens.no
+    res = ctx["lt"].place_fak_buy(market_slug=slug, token_id=str(token_id),
+                                  price=round(price, 4), size_usdc=round(cap_usd, 4))
+    fs = float(res.get("filled_shares") or 0)
+    return {"ok": fs > 0, "size_filled": fs, "raw": res}
+
+
+def fire_live(ctx, orders_path, platform, side, ask, cap_usd, window_epoch):
+    """Place a real BUY on the chosen platform. Returns dict with ok/size_filled.
+    Respects the cap_usd notional: shares = cap_usd / order_price."""
+    op = order_price(platform, ask)
+    shares = cap_usd / op
+    try:
+        if platform == "poly":
+            up_tok, dn_tok = poly_tokens(window_epoch)
+            tok = up_tok if side == "UP" else dn_tok
+            if not tok:
+                raise RuntimeError("no poly token for window")
+            r = place_poly(ctx, side, op, shares, tok)
+        elif platform == "pred":
+            mid = predict_market_id(window_epoch)
+            if mid is None:
+                raise RuntimeError("no predict market_id for window")
+            r = place_predict(ctx, side, op, shares, mid)
+        elif platform == "lim":
+            slug = limitless_slug(window_epoch)
+            if not slug:
+                raise RuntimeError("no limitless slug for window")
+            r = place_limitless(ctx, side, op, cap_usd, slug)
+        else:
+            raise ValueError(f"unknown platform {platform}")
+        log_order(orders_path, "BUY_OK" if r["ok"] else "BUY_NOFILL",
+                  window=window_epoch, platform=platform, side=side,
+                  price=op, cap=round(cap_usd, 2), filled=round(r["size_filled"], 4))
+        return r
+    except Exception as e:
+        log_order(orders_path, "BUY_ERROR", window=window_epoch, platform=platform,
+                  side=side, price=op, err=f"{type(e).__name__}: {e}")
+        return {"ok": False, "size_filled": 0.0, "raw": None, "error": str(e)}
+
+
+def build_live_ctx():
+    """Connect all three trading clients. Raises on any failure (fail fast before live)."""
+    from dotenv import load_dotenv
+    load_dotenv(ENV_PATH, override=True)
+    sys.path.insert(0, "/root")
+    from predict_trader import PredictTrader
+    from limitless_trader import LimitlessTrader
+    pk = os.environ["MY_PRIVATE_KEY"]
+    pt = PredictTrader(os.environ["PREDICT_API_KEY"], pk,
+                       log_path=os.path.join("/root/live/live5", "live5_predict.log"))
+    lt = LimitlessTrader(os.environ["LIMITLESS_API_KEY"], os.environ["LIMITLESS_API_SECRET"], pk,
+                         log_path=os.path.join("/root/live/live5", "live5_lim.log"))
+    from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import OrderArgsV2, OrderType
+    poly_client = ClobClient(host=POLY_HOST, key=pk, chain_id=137,
+                             signature_type=2, funder=POLY_SAFE)
+    poly_client.set_api_creds(poly_client.create_or_derive_api_key())
+    return {"pt": pt, "lt": lt, "poly_client": poly_client,
+            "OrderArgsV2": OrderArgsV2, "OrderType": OrderType,
+            "predict_meta_cache": {}}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", default=True,
                    help="No real orders (default)")
     p.add_argument("--live", action="store_true",
-                   help="ENABLE REAL ORDERS. Will refuse ג€” live not wired yet")
+                   help="ENABLE REAL ORDERS on poly/pred/lim (cheapest of the three)")
+    p.add_argument("--max-consecutive-losses", type=int, default=DEFAULT_MAX_CONSEC_LOSSES,
+                   help="circuit breaker: stop the bot after this many losing live trades in a row")
     p.add_argument("--thr", type=float, default=DEFAULT_THR)
     p.add_argument("--invest-usd", type=float, default=DEFAULT_INVEST_USD)
     p.add_argument("--win-half", type=int, default=DEFAULT_WIN_HALF)
@@ -892,14 +1060,17 @@ def main():
     p.add_argument("--out-dir", default=".")
     args = p.parse_args()
 
-    if args.live:
-        log("ERROR: --live not wired in this revision. Run dry-run first, then we add live.")
-        sys.exit(2)
-
     os.makedirs(args.out_dir, exist_ok=True)
     decisions_path = os.path.join(args.out_dir, OUT_DECISIONS)
     trades_path = os.path.join(args.out_dir, OUT_TRADES)
     limitless_path = os.path.join(args.out_dir, OUT_LIMITLESS)
+    orders_path = os.path.join(args.out_dir, OUT_ORDERS)
+
+    live_ctx = None
+    if args.live:
+        log("LIVE MODE REQUESTED — connecting trading clients (poly + predict + limitless)...")
+        live_ctx = build_live_ctx()
+        log("LIVE clients connected. REAL ORDERS WILL BE PLACED.")
 
     ensure_csv(decisions_path, [
         "ts_utc", "window_epoch", "sec_now",
@@ -954,7 +1125,9 @@ def main():
         "agree_poly_gem", "agree_poly_kal",
     ])
 
-    log(f"LIVE5 starting (DRY-RUN) — part-3 recipe, BTC")
+    log(f"LIVE5 starting ({'LIVE — REAL MONEY' if args.live else 'DRY-RUN'}) — part-3 recipe, BTC")
+    if args.live:
+        log(f"  CIRCUIT BREAKER: stop after {args.max_consecutive_losses} consecutive losing live trades")
     log(f"  thr={args.thr} trio_gap=${args.similar_gap} dist_min=${args.dist_min} tgtsim_max=${args.tgtsim_max} invest=${args.invest_usd}")
     log(f"  voters=pred5+lim5+okx5+gem5 (>=3), 4th leg=15m part-3, buy=cheapest(poly,pred,lim)")
     log(f"  win_half={args.win_half} fire_band=[{FIRE_SEC_MIN},{FIRE_SEC_MAX}], part-3 windows only (epoch%900==600)")
@@ -962,6 +1135,8 @@ def main():
 
     last_decided_window = None
     last_outcome_window = None
+    live_trades = {}        # window_epoch -> {"side","platform"} for FILLED live trades awaiting resolution
+    consec_losses = 0       # consecutive losing live trades (circuit breaker)
 
     while True:
         try:
@@ -1015,6 +1190,24 @@ def main():
                     ])
                 log(f"outcome win {prev_window}  poly={po} pred={pro} lim={lo} gem={go} kal={ko}  agree3={bool(agree3)}")
                 last_outcome_window = prev_window
+
+                # ----- circuit breaker: resolve our own live trade for this window -----
+                if prev_window in live_trades:
+                    lt_info = live_trades[prev_window]
+                    plat_oc = {"poly": po, "pred": pro, "lim": lo}.get(lt_info["platform"])
+                    if plat_oc in ("UP", "DOWN"):
+                        live_trades.pop(prev_window, None)
+                        won = (plat_oc == lt_info["side"])
+                        consec_losses = 0 if won else consec_losses + 1
+                        log_order(orders_path, "RESULT", window=prev_window,
+                                  platform=lt_info["platform"], side=lt_info["side"],
+                                  outcome=plat_oc, won=won, consec_losses=consec_losses)
+                        if not won and consec_losses >= args.max_consecutive_losses:
+                            log_order(orders_path, "CIRCUIT_BREAKER",
+                                      consec_losses=consec_losses, msg="stopping after consecutive losses")
+                            log(f"CIRCUIT BREAKER TRIPPED: {consec_losses} consecutive losing "
+                                f"live trades. Exiting to protect capital.")
+                            sys.exit(0)
 
             if window_epoch == last_decided_window:
                 time.sleep(POLL_SEC)
@@ -1124,6 +1317,19 @@ def main():
                 pot_profit_if_win = shares * (1 - price)
                 n15_agree = third["n15"]
                 n15_opp = sum(1 for v in s15.values() if v and v != side)
+
+                # ----- place the real order (live) or simulate (dry) -----
+                mode = "DRY"
+                if live_ctx is not None:
+                    res = fire_live(live_ctx, orders_path, platform, side, price, cap_usd, window_epoch)
+                    if res["ok"] and res["size_filled"] > 0:
+                        mode = "LIVE"
+                        shares = res["size_filled"]
+                        pot_profit_if_win = shares * (1 - price)
+                        live_trades[window_epoch] = {"side": side, "platform": platform}
+                    else:
+                        mode = "LIVE_NOFILL"
+
                 with open(trades_path, "a", newline="") as f:
                     csv.writer(f).writerow([
                         ts_iso, window_epoch, int(sec_now), side, platform, price,
@@ -1132,9 +1338,9 @@ def main():
                         third["names"],
                         round(third["tgtsim"], 2),
                         s15["pred15"], s15["lim15"], s15["okx15"], n15_agree, n15_opp,
-                        "DRY"
+                        mode
                     ])
-                log(f"window {window_epoch} sec={int(sec_now)} LIVE5 FIRE {side} on {platform.upper()} "
+                log(f"window {window_epoch} sec={int(sec_now)} LIVE5 FIRE [{mode}] {side} on {platform.upper()} "
                     f"@ {price:.3f}  5m={third['n5']}({third['names']}) 15m={n15_agree} "
                     f"dist={third['dist']:.0f} tgtsim={third['tgtsim']:.0f} "
                     f"liq=${usd_avail}  pot_win=${pot_profit_if_win:.3f}")
