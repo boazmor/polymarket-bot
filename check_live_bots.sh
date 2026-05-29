@@ -82,6 +82,8 @@ case "$HOST" in
     check_bot consensus_v3 live/consensus_v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3" live/consensus_v3/consensus_v3.log 600
     # consensus_v3_2 (3-of-4 fast consensus, buy cheapest 5m platform, Kalshi signal-only)
     check_bot consensus_v3_2 live/consensus_v3_2/CONSENSUS_BTC_V3_2.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3_2 --thr 0.60 --similar-gap 200" live/consensus_v3_2/consensus_v3_2.log 900
+    # LIVE5 (part-3 recipe, DRY): part-3 windows only, 3of4 5m + 15m confirm + dist + tgtsim
+    check_bot live5 live/live5/LIVE5.py "--invest-usd 2.0 --out-dir /root/live/live5" live/live5/live5.log 1800
 
 
     # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict
