@@ -79,11 +79,32 @@ case "$HOST" in
     check_bot arb_v5_3way_live arb_v5_3way_live.py "--max-trades-per-window 1 --invest 7.0" arb_v5_3way_live_v1.log 180
     # consensus_v2 STOPPED 28/05 — loses after fees (72% win vs 75% break-even). Files kept for history.
     # consensus_v3 (V2 + third-platform sim+agree, scans sec 30-270, fires on first match)
-    check_bot consensus_v3 live/consensus_v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3" live/consensus_v3/consensus_v3.log 600
+    # DROPPED 02/06 (replaced by v1): check_bot consensus_v3 live/consensus_v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3" live/consensus_v3/consensus_v3.log 600
     # consensus_v3_2 (3-of-4 fast consensus, buy cheapest 5m platform, Kalshi signal-only)
     check_bot consensus_v3_2 live/consensus_v3_2/CONSENSUS_BTC_V3_2.py "--invest-usd 2.0 --out-dir /root/live/consensus_v3_2 --thr 0.60 --similar-gap 200" live/consensus_v3_2/consensus_v3_2.log 900
-    # LIVE5 (part-3 recipe, DRY): part-3 windows only, 3of4 5m + 15m confirm + dist + tgtsim
-    check_bot live5 live/live5/LIVE5.py "--invest-usd 2.0 --out-dir /root/live/live5" live/live5/live5.log 1800
+    # V1 super-bot (414 100%-winrate combos, dedup, DRY): added 02/06
+    check_bot v1 live/v1/CONSENSUS_BTC_V1.py "--invest-usd 2.0 --out-dir /root/live/v1" live/v1/v1.log 900
+    # V2 super-bot (poly+pred consensus + poly-extreme overlay): added 03/06
+    check_bot v2 live/v2/CONSENSUS_BTC_V2.py "--invest-usd 2.0 --poly-extreme 0.75 --out-dir /root/live/v2" live/v2/v2.log 900
+    # V3 bot: BUY LIM DOWN at extreme negative spread vs Poly target: added 03/06
+    check_bot v3 live/v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/v3" live/v3/v3.log 900
+    # LIVE5 (part-3 recipe, LIVE real money): 3 of 4 voters {pred,lim,okx,gem} + 15m confirm + dist + tgtsim + (50,100] excluded
+    # buy-health monitor (cron */5) creates /root/live/live5/live5.disabled when persistent buy failures detected.
+    # CRITICAL: serialize against check_buy_health.sh via /root/live/live5/live5.lock — both fire on */5 and could
+    # race to start a second live5 process leading to double real-money orders. Sub-shell flocks so other bots in
+    # this script are unaffected if the lock is held.
+    (
+        exec 9>/root/live/live5/live5.lock
+        if ! flock -n 9; then
+            echo "$(date -u +%FT%TZ) live5 LOCK_BUSY (buy-health holding) — skip" >> "$LOG"
+            exit 0
+        fi
+        if [ -f /root/live/live5/live5.disabled ]; then
+            echo "$(date -u +%FT%TZ) live5 SKIPPED (live5.disabled present)" >> "$LOG"
+        else
+            check_bot live5 live/live5/LIVE5.py "--live --invest-usd 2.0 --max-consecutive-losses 2 --out-dir /root/live/live5" live/live5/live5.log 1800
+        fi
+    )
 
 
     # V7 paused 13/05 pending freshness model rollout. Has 2 unhedged Predict

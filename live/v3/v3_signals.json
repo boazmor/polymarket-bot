@@ -1,0 +1,18 @@
+{
+  "_comment": "V3 unified signals — verified profitable in both UP/DOWN BTC trends.",
+  "_format": "anchor: signal source platform. target: where to BUY. spread = anchor_target - target_target ($). side: which side to buy on target.",
+  "signals": [
+    {"name": "okx_pred_240_30neg_0",   "anchor": "okx",  "target": "pred", "sec": 240, "spread_lo": -30,  "spread_hi": 0,   "side": "DOWN"},
+    {"name": "okx_pred_270_0_30",      "anchor": "okx",  "target": "pred", "sec": 270, "spread_lo": 0,    "spread_hi": 30,  "side": "DOWN"},
+    {"name": "okx_pred_240_0_30",      "anchor": "okx",  "target": "pred", "sec": 240, "spread_lo": 0,    "spread_hi": 30,  "side": "DOWN"},
+    {"name": "okx_pred_270_30neg_0",   "anchor": "okx",  "target": "pred", "sec": 270, "spread_lo": -30,  "spread_hi": 0,   "side": "DOWN"},
+    {"name": "poly_pred_240_130_110",  "anchor": "poly", "target": "pred", "sec": 240, "spread_lo": -130, "spread_hi": -110, "side": "DOWN"},
+    {"name": "poly_pred_240_110_90",   "anchor": "poly", "target": "pred", "sec": 240, "spread_lo": -110, "spread_hi": -90, "side": "DOWN"},
+    {"name": "poly_pred_270_110_90",   "anchor": "poly", "target": "pred", "sec": 270, "spread_lo": -110, "spread_hi": -90, "side": "DOWN"},
+    {"name": "poly_lim_240_150_130",   "anchor": "poly", "target": "lim",  "sec": 240, "spread_lo": -150, "spread_hi": -130, "side": "DOWN"},
+    {"name": "poly_lim_270_150_130",   "anchor": "poly", "target": "lim",  "sec": 270, "spread_lo": -150, "spread_hi": -130, "side": "DOWN"},
+    {"name": "okx_lim_270_60neg_30",   "anchor": "okx",  "target": "lim",  "sec": 270, "spread_lo": -60,  "spread_hi": -30, "side": "DOWN"},
+    {"name": "lim_pred_240_0_30",      "anchor": "lim",  "target": "pred", "sec": 240, "spread_lo": 0,    "spread_hi": 30,  "side": "DOWN"},
+    {"name": "pred_lim_270_30neg_0",   "anchor": "pred", "target": "lim",  "sec": 270, "spread_lo": -30,  "spread_hi": 0,   "side": "DOWN"}
+  ]
+}

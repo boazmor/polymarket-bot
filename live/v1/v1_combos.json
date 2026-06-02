@@ -1,0 +1,4395 @@
+{
+  "combos_100": [
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 31,
+      "wins": 31,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 12,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 28,
+      "wins": 28,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 12,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 27,
+      "wins": 27,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 27,
+      "wins": 27,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 25,
+      "wins": 25,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 25,
+      "wins": 25,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 24,
+      "wins": 24,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 12,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 23,
+      "wins": 23,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 12,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 23,
+      "wins": 23,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 22,
+      "wins": 22,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 22,
+      "wins": 22,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 40,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 21,
+      "wins": 21,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 21,
+      "wins": 21,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 18,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 21,
+      "wins": 21,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 21,
+      "wins": 21,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 18,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 21,
+      "wins": 21,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 20,
+      "wins": 20,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 20,
+      "wins": 20,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 20,
+      "wins": 20,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 19,
+      "wins": 19,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 18,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 19,
+      "wins": 19,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 12,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 12,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 18,
+      "wins": 18,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 40,
+      "sec": 210,
+      "third": "lim_and_kal",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 17,
+      "wins": 17,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 16,
+      "wins": 16,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 40,
+      "sec": 210,
+      "third": "lim_and_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 40,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 15,
+      "wins": 15,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 40,
+      "sec": 90,
+      "third": "lim_and_kal",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 14,
+      "wins": 14,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 13,
+      "wins": 13,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 12,
+      "wins": 12,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 12,
+      "wins": 12,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 12,
+      "wins": 12,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 12,
+      "wins": 12,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 12,
+      "wins": 12,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 11,
+      "wins": 11,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 135,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 40,
+      "sec": 90,
+      "third": "lim_and_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 40,
+      "sec": 210,
+      "third": "lim_and_kal",
+      "fires": 10,
+      "wins": 10,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 12,
+      "sec": 225,
+      "third": "lim_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 75,
+      "third": "lim_only",
+      "fires": 9,
+      "wins": 9,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 12,
+      "sec": 225,
+      "third": "lim_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 135,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 8,
+      "sec": 180,
+      "third": "lim_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 8,
+      "sec": 180,
+      "third": "lim_only",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 40,
+      "sec": 270,
+      "third": "lim_and_kal",
+      "fires": 8,
+      "wins": 8,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 60,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 25,
+      "sec": 150,
+      "third": "lim_and_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 25,
+      "sec": 150,
+      "third": "lim_and_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 255,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 135,
+      "third": "lim_or_kal",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 12,
+      "sec": 225,
+      "third": "lim_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 18,
+      "sec": 45,
+      "third": "kal_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 18,
+      "sec": 75,
+      "third": "lim_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 18,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 7,
+      "wins": 7,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 60,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 60,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 135,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 5,
+      "sec": 255,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 135,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 255,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 75,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 135,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 255,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 255,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 255,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 195,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 210,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 240,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 225,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 255,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 150,
+      "third": "lim_only",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 150,
+      "third": "lim_and_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 40,
+      "sec": 75,
+      "third": "lim_and_kal",
+      "fires": 6,
+      "wins": 6,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 165,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 25,
+      "sec": 105,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.5,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 60,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 60,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 165,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 2,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 25,
+      "sec": 105,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.55,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 60,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 60,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 165,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 8,
+      "sec": 225,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 25,
+      "sec": 105,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.6,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 75,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 165,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 75,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 150,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 60,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 3,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 135,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 5,
+      "sec": 210,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 12,
+      "sec": 270,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 25,
+      "sec": 105,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.65,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 165,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 135,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 165,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 180,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 3,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 135,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 135,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 5,
+      "sec": 180,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 25,
+      "sec": 135,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.7,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 210,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 240,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 270,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 1,
+      "sec": 270,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 195,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 2,
+      "sec": 225,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 135,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 3,
+      "sec": 180,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 75,
+      "third": "lim_or_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 90,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 105,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 120,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 150,
+      "third": "kal_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 5,
+      "sec": 180,
+      "third": "lim_only",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 195,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    },
+    {
+      "thr": 0.75,
+      "gap": 25,
+      "sec": 225,
+      "third": "lim_and_kal",
+      "fires": 5,
+      "wins": 5,
+      "losses": 0,
+      "wr": 100.0
+    }
+  ],
+  "generated_at": "2026-06-02 21:09:02.017564"
+}
