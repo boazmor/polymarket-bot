@@ -1,0 +1,12 @@
+{
+  "_comment": "Pair-spread statistics from full-overlap window 28/05-02/06.",
+  "_format": "Each pair: [median_spread_dollars, stdev_dollars]. Extreme = z-score >= 2.",
+  "pairs": {
+    "poly-pred": [-104.7, 10.9],
+    "poly-lim":  [-106.3, 35.9],
+    "poly-okx":  [-104.5, 10.9],
+    "pred-lim":  [-0.9, 34.0],
+    "pred-okx":  [-0.0, 3.7],
+    "lim-okx":   [0.2, 33.6]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "_comment": "V6 next-window LIMIT signals. Detect in window N, fill in window N+1 at limit price.",
+  "_format": "Each signal: name, extremes required in window N, target+side for window N+1 limit, limit_price",
+  "default_limit_price": 0.30,
+  "signals": [
+    {
+      "name": "all_above_next_pred_DOWN",
+      "extremes": [{"any_2_pairs_above": true}],
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.30,
+      "expected_win_rate_next": 79,
+      "fires_per_week_estimate": 23
+    },
+    {
+      "name": "limokx_above_polylim_below_next_pred_DOWN",
+      "extremes": [{"pair": "lim-okx", "dir": "ABOVE"}, {"pair": "poly-lim", "dir": "BELOW"}],
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.30,
+      "expected_win_rate_next": 74,
+      "fires_per_week_estimate": 23
+    },
+    {
+      "name": "limokx_above_predlim_below_next_pred_DOWN",
+      "extremes": [{"pair": "lim-okx", "dir": "ABOVE"}, {"pair": "pred-lim", "dir": "BELOW"}],
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.30,
+      "expected_win_rate_next": 83,
+      "fires_per_week_estimate": 7
+    },
+    {
+      "name": "predokx_above_polypred_below_next_pred_DOWN",
+      "extremes": [{"pair": "pred-okx", "dir": "ABOVE"}, {"pair": "poly-pred", "dir": "BELOW"}],
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.30,
+      "expected_win_rate_next": 80,
+      "fires_per_week_estimate": 6
+    }
+  ]
+}

@@ -88,6 +88,14 @@ case "$HOST" in
     check_bot v2 live/v2/CONSENSUS_BTC_V2.py "--invest-usd 2.0 --poly-extreme 0.75 --out-dir /root/live/v2" live/v2/v2.log 900
     # V3 bot: BUY LIM DOWN at extreme negative spread vs Poly target: added 03/06
     check_bot v3 live/v3/CONSENSUS_BTC_V3.py "--invest-usd 2.0 --out-dir /root/live/v3" live/v3/v3.log 900
+    # V4 unified (double-extreme pair-spread): added 03/06
+    check_bot v4 live/v4/CONSENSUS_BTC_V4.py "--invest-usd 2.0 --fire-secs 60,120,180,240 --out-dir /root/live/v4" live/v4/v4.log 900
+    # V5 outlier-continuation LIMIT bot: added 03/06
+    check_bot v5 live/v5/CONSENSUS_BTC_V5.py "--invest-usd 2.0 --out-dir /root/live/v5" live/v5/v5.log 900
+    # V6 next-window LIMIT bot: added 03/06
+    check_bot v6 live/v6/CONSENSUS_BTC_V6.py "--invest-usd 2.0 --detect-secs 60,120,180,240 --out-dir /root/live/v6" live/v6/v6.log 900
+    # V7 double-outlier LIMIT bot: added 03/06
+    check_bot v7 live/v7/CONSENSUS_BTC_V7.py "--invest-usd 2.0 --out-dir /root/live/v7" live/v7/v7.log 900
     # LIVE5 (part-3 recipe, LIVE real money): 3 of 4 voters {pred,lim,okx,gem} + 15m confirm + dist + tgtsim + (50,100] excluded
     # buy-health monitor (cron */5) creates /root/live/live5/live5.disabled when persistent buy failures detected.
     # CRITICAL: serialize against check_buy_health.sh via /root/live/live5/live5.lock — both fire on */5 and could

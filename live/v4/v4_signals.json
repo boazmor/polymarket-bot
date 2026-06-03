@@ -1,0 +1,48 @@
+{
+  "_comment": "V4 unified signals — double-extreme pair-spread patterns.",
+  "_format": "Each signal: name, extremes (list of pair+direction), target (which platform to buy on), side, fire_secs",
+  "_extreme_definition": "spread - median >= 2*sd ABOVE, or <= -2*sd BELOW",
+  "signals": [
+    {
+      "name": "all_above_pred_DOWN",
+      "extremes": [{"any_2_pairs_above": true}],
+      "matches_when": "2 pair-spreads simultaneously ABOVE typical",
+      "target": "pred",
+      "side": "DOWN",
+      "expected_win_rate": 71,
+      "fires_per_week": 29
+    },
+    {
+      "name": "mixed_polylim_above_limokx_below_pred_DOWN",
+      "extremes": [{"pair": "poly-lim", "dir": "ABOVE"}, {"pair": "lim-okx", "dir": "BELOW"}],
+      "target": "pred",
+      "side": "DOWN",
+      "expected_win_rate": 81,
+      "fires_per_week": 31
+    },
+    {
+      "name": "mixed_limokx_above_polylim_below_poly_UP",
+      "extremes": [{"pair": "lim-okx", "dir": "ABOVE"}, {"pair": "poly-lim", "dir": "BELOW"}],
+      "target": "poly",
+      "side": "UP",
+      "expected_win_rate": 80,
+      "fires_per_week": 30
+    },
+    {
+      "name": "mixed_predlim_above_limokx_below_pred_DOWN",
+      "extremes": [{"pair": "pred-lim", "dir": "ABOVE"}, {"pair": "lim-okx", "dir": "BELOW"}],
+      "target": "pred",
+      "side": "DOWN",
+      "expected_win_rate": 100,
+      "fires_per_week": 7
+    },
+    {
+      "name": "mixed_limokx_above_predlim_below_poly_UP",
+      "extremes": [{"pair": "lim-okx", "dir": "ABOVE"}, {"pair": "pred-lim", "dir": "BELOW"}],
+      "target": "poly",
+      "side": "UP",
+      "expected_win_rate": 83,
+      "fires_per_week": 7
+    }
+  ]
+}

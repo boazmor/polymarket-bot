@@ -1,0 +1,19 @@
+{
+  "_comment": "V5 — single-outlier only. Double-outlier moved to V7.",
+  "default_limit_price": 0.30,
+  "signals": [
+    {
+      "name": "pred_outlier_cons_UP_next_pred_DOWN",
+      "type": "single_outlier",
+      "outlier_platform": "pred",
+      "consensus_direction": "UP",
+      "min_anchor_distance_abs": 30,
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.30,
+      "fire_in_window_offset": 1,
+      "expected_win_rate": 67,
+      "fires_per_week_estimate": 56
+    }
+  ]
+}

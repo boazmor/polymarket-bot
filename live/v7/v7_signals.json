@@ -1,0 +1,38 @@
+{
+  "_comment": "V7 double-outlier signals. Same platform outlier 2 consecutive windows. LIMIT in window N+2.",
+  "default_limit_price": 0.25,
+  "signals": [
+    {
+      "name": "lim_double_cons_DOWN_DOWN_next_lim_DOWN",
+      "outlier_platform": "lim",
+      "consensus_pattern": ["DOWN", "DOWN"],
+      "target": "lim",
+      "side": "DOWN",
+      "limit_price": 0.25,
+      "expected_win_rate": 80,
+      "fires_per_week_estimate": 6,
+      "sample_size_note": "5 cases in 5.9 days — tiny, watch carefully"
+    },
+    {
+      "name": "lim_double_cons_UP_DOWN_pred_DOWN",
+      "outlier_platform": "lim",
+      "consensus_pattern": ["UP", "DOWN"],
+      "target": "pred",
+      "side": "DOWN",
+      "limit_price": 0.25,
+      "expected_win_rate": 75,
+      "fires_per_week_estimate": 5
+    },
+    {
+      "name": "pred_double_cons_UP_UP_poly_DOWN",
+      "outlier_platform": "pred",
+      "consensus_pattern": ["UP", "UP"],
+      "target": "poly",
+      "side": "DOWN",
+      "limit_price": 0.25,
+      "expected_win_rate": 75,
+      "fires_per_week_estimate": 5,
+      "sample_size_note": "4 cases — tiny"
+    }
+  ]
+}
